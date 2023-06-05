@@ -75,11 +75,13 @@ def main(taxids, desired_ranks, path):
 def setting():
     parser = argparse.ArgumentParser(prog='quantify and detect pathogens', usage='%(prog)s [options]')
     parser.add_argument("-o","--output", nargs="?", default="output", help="output name")
+    parser.add_argument("-r", "--retmax", nargs="?", type = int, default="100000", help="number of id to retrieve per itaration")
     parser.add_argument("--barcode", help="barcode to analyse", required=True)
     parser.add_argument("-f5","--folder_fast5", help="folder containing fast5 files",default="/data/sharedata/")
-    parser.add_argument("-t", "--threads", nargs="?", type = int, default="10", help="number of thres")
+    parser.add_argument("-t", "--threads", nargs="?", type = int, default="10", help="number of threads")
     parser.add_argument("-d", "--database", nargs="?", choices=['Plant_Bacteria_Funghi.nal', 'nt.nal', 'ITS_16S_18S_28S_LSU_SSU.nal',
-                                                                'Metazoa_Organism_OR_metazoa_All_Fields_.nal','Xanthomonas_genomes.nal','curatedXylellaDatabase.nal'],
+                                                                'Metazoa_Organism_OR_metazoa_All_Fields_.nal','Xanthomonas_genomes.nal','curatedXylellaDatabase.nal',
+                                                                'customITSreduced.nal','customITSreducedReduced.nal'],
                         default="Plant_Bacteria_Funghi.nal",
                         help="database name; can be a fasta file or a subset of ncbi database; Default is Plant_Bacteria_Funghi")
     parser.add_argument("-w", "--workdir", nargs="?", default="/tmp/")
@@ -397,7 +399,7 @@ def analysis():
         if not os.path.exists(database_name_check) or args.update:
             handle_n = Entrez.esearch(db="nucleotide", term=args.search)
             record_n = Entrez.read(handle_n)
-            retmax = 10000000
+            retmax = args.retmax
             retstart = 0
             repeat = (str(int(record_n['Count'])/retmax)).split(".")[0]
             print("FOUND " + str(record_n['Count']) + " SEQUENCES\n")
@@ -628,15 +630,16 @@ def analysis():
                             read = align_elm[0]
                             score = float(align_elm[2])
                             align_species_score[align_elm[4]] =  [align_elm[3]]
-                            if score > 200 and float(align_elm[4]) >= args.percentage :
-                                if score in align_species:
-                                    for key in  align_species[score]:
-                                        if align_elm[4] in align_species_score:
-                                            align_species[score][key].append(align_elm[3])
-                                        else:
-                                            align_species[score][key] = [align_elm[3]]
-                                else:
-                                    align_species[score] = align_species_score
+                            if align_elm[3] != "N/A":
+                                if score > 200 and float(align_elm[4]) >= args.percentage :
+                                    if score in align_species:
+                                        for key in  align_species[score]:
+                                            if align_elm[4] in align_species_score:
+                                                align_species[score][key].append(align_elm[3])
+                                            else:
+                                                align_species[score][key] = [align_elm[3]]
+                                    else:
+                                        align_species[score] = align_species_score
                     if align_species:
                         list_align_species = list(align_species.items())
                         list_align_species.sort(reverse=True)
