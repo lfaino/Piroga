@@ -1,6 +1,7 @@
-#! /usr/bin/python
+import argparse
 import sys
 import uuid
+import fileinput
 import random
 import string
 from matplotlib import pyplot as plt
@@ -24,11 +25,10 @@ from io import StringIO
 from difflib import SequenceMatcher
 from tqdm import tqdm
 import tempfile
-import argparse
 import pandas as pd
 from matplotlib.colors import LinearSegmentedColormap
 import csv
-from ete3 import NCBITaxa
+from ete4 import NCBITaxa
 import requests
 import xml.etree.ElementTree as ET
 
@@ -66,71 +66,82 @@ TABIX = "tabix -p vcf %s"
 mlst_database = "https://pubmlst.org/data/dbases.xml"
 
 ncbi = NCBITaxa()
+#def setting():
+parser = argparse.ArgumentParser(prog='quantify and detect pathogens', usage='%(prog)s [options]')
+parser.add_argument("-o","--output", nargs="?", default="output", help="output name")
+parser.add_argument("-r", "--retmax", nargs="?", type = int, default="100000", help="number of id to retrieve per itaration")
+parser.add_argument("--barcode", help="barcode to analyse", required=True)
+parser.add_argument("-f5","--folder_fast5", help="folder containing fast5 files",default="/data/sharedata/")
+parser.add_argument("-t", "--threads", nargs="?", type = int, default="10", help="number of threads")
+parser.add_argument("-d", "--database", nargs="?", choices=['Plant_Bacteria_Funghi.nal', 'nt.nal', 'ITS_16S_18S_28S_LSU_SSU.nal',
+                                                            'Metazoa_Organism_OR_metazoa_All_Fields_.nal','Xanthomonas_genomes.nal','curatedXylellaDatabase.nal',
+                                                            'customITSreduced.nal','customITSreducedReduced.nal','BacteriaFungiVitis.nal',
+                                                            '50_4000RefSeq_biomol_genomic_ITS_16S_18S_28S_LSU_SSU.nal',
+                                                            'bacterialGenome2024_01_24.fna.nal'],
+                    default="",
+                    help="database name; can be a fasta file or a subset of ncbi database; Default is Plant_Bacteria_Funghi")
+parser.add_argument("-dbe", "--database_external", nargs="?")
+parser.add_argument("-tmp", "--temp", nargs="?", default="/tmp/")
+parser.add_argument("--folder_fastq", help='folder where fastq file are located', required=True,
+                    default="/data/sharedata/")#, widget='DirChooser')
+parser.add_argument("-e", "--email", nargs="?", default="", help="email for blast search", required=True)
+parser.add_argument("-s", "--search", nargs="?", default="", help="ncbi search to retrieve GIs")
+parser.add_argument("-sp", "--species", nargs="?", default="", help="PUBMLST species to use")
+parser.add_argument("-m", "--min",  default="1", help="minimum number of reads to plot a species as "
+                                                       "fraction of total mappd reads [0-100]", type=float)
+parser.add_argument("-mr", "--min_reads", type = float, default="100", help="minimum number of reads to "
+                                                                            "sequence to consider a sample in the "
+                                                                            "analysis")
+parser.add_argument("-int", "--interval", default="100-20000", help="minimum and max read length"
+                                                                            " to use in the correction step; default [100-20000]")
+parser.add_argument("-su", "--subset", default="0", type = int, help="number of reads to use for each barcode [0]")
+parser.add_argument("-mrc", "--num_reads_cor", type=int, default="0",
+                    help="minimum number of reads to use in overlapping for reads correction [0]. 0 = no filtering")
 
-def setting():
-    parser = argparse.ArgumentParser(prog='quantify and detect pathogens', usage='%(prog)s [options]')
-    parser.add_argument("-o","--output", nargs="?", default="output", help="output name")
-    parser.add_argument("-r", "--retmax", nargs="?", type = int, default="100000", help="number of id to retrieve per itaration")
-    parser.add_argument("--barcode", help="barcode to analyse", required=True)
-    parser.add_argument("-f5","--folder_fast5", help="folder containing fast5 files",default="/data/sharedata/")
-    parser.add_argument("-t", "--threads", nargs="?", type = int, default="10", help="number of threads")
-    parser.add_argument("-d", "--database", nargs="?", choices=['Plant_Bacteria_Funghi.nal', 'nt.nal', 'ITS_16S_18S_28S_LSU_SSU.nal',
-                                                                'Metazoa_Organism_OR_metazoa_All_Fields_.nal','Xanthomonas_genomes.nal','curatedXylellaDatabase.nal',
-                                                                'customITSreduced.nal','customITSreducedReduced.nal','BacteriaFungiVitis.nal',
-                                                                '50_4000RefSeq_biomol_genomic_ITS_16S_18S_28S_LSU_SSU.nal','bacterialGenome2024_01_24.fna.nal'],
-                        default="",
-                        help="database name; can be a fasta file or a subset of ncbi database; Default is Plant_Bacteria_Funghi")
-    parser.add_argument("-de", "--database_external", nargs="?")
-    parser.add_argument("-tmp", "--temp", nargs="?", default="/tmp/")
-    parser.add_argument("--folder_fastq", help='folder where fastq file are located', required=True,
-                        default="/data/sharedata/")#, widget='DirChooser')
-    parser.add_argument("-e", "--email", nargs="?", default="", help="email for blast search", required=True)
-    parser.add_argument("-s", "--search", nargs="?", default="", help="ncbi search to retrieve GIs")
-    parser.add_argument("-sp", "--species", nargs="?", default="", help="PUBMLST species to use")
-    parser.add_argument("-m", "--min",  default="10", help="minimum number of reads to plot a species as "
-                                                           "fraction of total mappd reads [0-100]")
-    parser.add_argument("-p", "--percentage", type = float, default="90", help="minimum identity to consider "
-                                                                               "a valid alignment")
-    parser.add_argument("-mr", "--min_reads", type = float, default="100", help="minimum number of reads to "
-                                                                                "sequence to consider a sample in the "
-                                                                                "analysis")
-    parser.add_argument("-int", "--interval", default="100-20000", help="minimum and max read length"
-                                                                                " to use in the correction step; default [100-20000]")
-    parser.add_argument("-su", "--subset", default="0", type = int, help="number of reads to use for each barcode [0]")
-    parser.add_argument("-mrc", "--num_reads_cor", type=int, default="0",
-                        help="minimum number of reads to use in overlapping for reads correction [0]. 0 = no filtering")
-
-    parser.add_argument("-a", "--assemble", action='store_true', help="assembled-reads", default=False)
-    parser.add_argument("-ua", "--use_assembled", action='store_true', help="use assembled reads for "
-                                                                            "discovery", default=False)
-    parser.add_argument("-dh", "--database_history", action='store_true', help="", default=False)
-    parser.add_argument("-c", "--correct", action='store_true', help="correct or not reads via racon",
-                        default=False)
-    parser.add_argument("-mafft", "--mafft", action='store_true', help="correct or not reads via racon",
-                        default=False)
-    parser.add_argument("-u", "--update", action='store_true', help="update database", default=False)#nargs="?", default="", required=True)
-    parser.add_argument("-v",'--verbose', help='be verbose', dest='verbose', action='store_true', default=False)
-
-
-    args = parser.parse_args()
-    return args
+parser.add_argument("-a", "--assemble", action='store_true', help="assembled-reads", default=False)
+parser.add_argument("-ua", "--use_assembled", action='store_true', help="use assembled reads for "
+                                                                        "discovery", default=False)
+parser.add_argument("-dh", "--database_history", action='store_true', help="", default=False)
+parser.add_argument("-c", "--correct", action='store_true', help="correct or not reads via racon",
+                    default=False)
+parser.add_argument("-mafft", "--mafft", action='store_true', help="correct or not reads via racon",
+                    default=False)
+parser.add_argument("-u", "--update", action='store_true', help="update database", default=False)
+parser.add_argument("-u_e3", "--update_ete", action='store_true', help="update database ete3", default=False)#nargs="?", default="", required=True)#nargs="?", default="", required=True)
+parser.add_argument("-v",'--verbose', help='be verbose', dest='verbose', action='store_true', default=False)
 
 
+#args = parser.parse_args()
+    #return args
 
 def get_desired_ranks(taxid, desired_ranks):
-    lineage = ncbi.get_lineage(taxid)
-    lineage2ranks = ncbi.get_rank(lineage)
-    ranks2lineage = dict((rank, taxid) for (taxid, rank) in lineage2ranks.items())
-    return {'{}_id'.format(rank): ranks2lineage.get(rank, '<not present>') for rank in desired_ranks}
+    value_taxid, score = taxid
+    try:
+        lineage = ncbi.get_lineage(value_taxid)
+        lineage2ranks = ncbi.get_rank(lineage)
+        ranks2lineage = dict((rank, value_taxid) for (value_taxid, rank) in lineage2ranks.items())
+        ranks2lineage_select = {'{}'.format(rank): ranks2lineage.get(rank, '<not present>') for rank in desired_ranks}
+        for key in ranks2lineage_select:
+            if ranks2lineage_select[key] != "<not present>":
+                ranks2lineage_select[key] = list(ncbi.get_taxid_translator([ranks2lineage_select[key]]).values())[0]
+        taxid_dict = {"tax_id": value_taxid,"abundance":score}
+        taxid_dict.update(ranks2lineage_select)
+        return(taxid_dict)
+    except:
+        print(str(taxid))
+        return ()
 
-# def main(taxids, desired_ranks, path):
-#     with open(path, 'w') as csvfile:
-#         fieldnames = ['{}_id'.format(rank) for rank in desired_ranks]
-#         writer = csv.DictWriter(csvfile, delimiter='\t', fieldnames=fieldnames)
-#         writer.writeheader()
-#         for taxid in taxids:
-#             writer.writerow(get_desired_ranks(taxid, desired_ranks))
-
+def desired_rank_file(taxids, desired_ranks):
+    taxid_dict = {}
+    #with open(path, 'w') as csvfile:
+        #fieldnames = ['{}'.format(rank) for rank in desired_ranks]
+        #fieldnames_taxid = ["tax_id"] + ["abundance"]+ fieldnames
+        #writer = csv.DictWriter(csvfile, delimiter='\t', fieldnames=fieldnames_taxid)
+        #writer.writeheader()
+    for taxid in tqdm(taxids):
+        rank = get_desired_ranks(taxid, desired_ranks)
+        taxid_dict[taxid[0]] = rank
+    return(taxid_dict)
 
 def best_align_match(samfile, iteration):
     if iteration > 0:
@@ -162,7 +173,6 @@ def get_consensus_seq(filename):
     consensus = summary.dumb_consensus(0.7, "N")
     return consensus
 
-
 def consensus_seq(file, fastq, set_count):
     print(fastq.name)
     record_dict = SeqIO.to_dict(SeqIO.parse(fastq.name, "fasta"))
@@ -182,7 +192,7 @@ def consensus_seq(file, fastq, set_count):
                 count = 0
     files_to_align = []
     for key in samDict:
-        fasta = tempfile.NamedTemporaryFile(suffix=".fasta", delete=False, mode="w")
+        fasta = tempfile.NamedTemporaryFile(dir=dirpathTEMP, suffix=".fasta", delete=False, mode="w")
         list_record = samDict[key]
         for pair in list_record:
             id, strand = pair
@@ -204,9 +214,8 @@ def consensus_seq(file, fastq, set_count):
     print(outfile)
     return outfile
 
-
 def mafft(fasta):
-    aln = tempfile.NamedTemporaryFile(suffix=".fasta", delete=False, mode="w")
+    aln = tempfile.NamedTemporaryFile(dir=dirpathTEMP,  suffix=".fasta", delete=False, mode="w")
     mafft_cline = MafftCommandline(input=fasta)
     stdout, stderr = mafft_cline()
     aln.write(stdout)
@@ -215,7 +224,6 @@ def mafft(fasta):
         first_line = f.readline()
     consensus = first_line.rstrip() + "\n" + str(cons) + "\n"
     return (consensus)
-
 
 def convert_color(test):
     values = dict()
@@ -249,26 +257,21 @@ def convert_color(test):
     return(complete_colors)
 
 def blast(elm):
-    blastn_cline = Bio.Blast.Applications.NcbiblastnCommandline(db=elm[1], query=elm[0], evalue=0.001, out=elm[2] ,outfmt = "6 qseqid sseqid bitscore sscinames pident evalue staxids qlen" )
-    try:
-        blastn_cline()
-        if not verbose:
-            os.remove(elm[0])
-    except ValueError:
-        print(blastn_cline)
-    return(elm[2])
 
-def common_start(*s):
-   l = len(s)
-   if l == 0:
-       return None
-   elif l == 1:
-       return s[0]
-   start = s[0]
-   while start != "" and not all(ii.startswith(start) for ii in s[1:]):
-       start = start[:-1]
+    query, db, out, verbose = elm
+    if os.path.isfile(out) and os.path.getsize(out) > 0 and verbose:
+        return out
+    else:
+        blastn_cline = Bio.Blast.Applications.NcbiblastnCommandline(db=db, query=query, max_target_seqs=10 ,evalue=0.001, out=out,
+                                                                outfmt = "6 qseqid sseqid bitscore sscinames pident evalue staxids qlen")
 
-   return start
+        try:
+            blastn_cline()
+            if not verbose:
+                os.remove(query)
+        except ValueError:
+            print(blastn_cline)
+        return(out)
 
 def download_fasta(elm):
     search, retmax, retstart, email = elm
@@ -367,26 +370,29 @@ def racon(fastq, threads, cwd, num_reads_cor, mafft):
     output = tempfile.NamedTemporaryFile(dir=dirpathTEMP,suffix=".fasta", delete=False)
     racon_cmd = sb.Popen(r, shell=True, cwd=cwd, stdout=output, stderr=sb.PIPE)
     racon_cmd.communicate()
-    sam = tempfile.NamedTemporaryFile(dir=dirpathTEMP,suffix=".paf.gz", delete=False)
-    print("RUNNING MINIMAP")
-    m = MINIMAP % (threads, output.name, output.name, sam.name)
-    print(m)
-    minimap = sb.Popen(m, shell=True, cwd=cwd, stderr=sb.PIPE)
-    minimap.communicate()
-    if num_reads_cor == 0:
-        num_reads_cor = 100
-    outputCons = consensus_seq(sam.name, output, num_reads_cor)
-    if not verbose:
-        os.remove(sam.name)
-    if os.path.exists(filtered):
+    if mafft:
+        print("RUNNING MAFFT FOR READ CORRECTION AND ASSEMBLY")
+        sam = tempfile.NamedTemporaryFile(dir=dirpathTEMP,suffix=".paf.gz", delete=False)
+        print("RUNNING MINIMAP")
+        m = MINIMAP % (threads, output.name, output.name, sam.name)
+        print(m)
+        minimap = sb.Popen(m, shell=True, cwd=cwd, stderr=sb.PIPE)
+        minimap.communicate()
+        if num_reads_cor == 0:
+            num_reads_cor = 100
+        outputCons = consensus_seq(sam.name, output, num_reads_cor)
         if not verbose:
-            os.remove(filtered)
-    if not verbose:
-        os.remove(reads.name)
-    if verbose:
-        print("Racon output is:" + outputCons)
-
-    return(outputCons)
+            os.remove(sam.name)
+        if os.path.exists(filtered):
+            if not verbose:
+                os.remove(filtered)
+        if not verbose:
+            os.remove(reads.name)
+        if verbose:
+            print("Racon output is:" + outputCons)
+        return(outputCons)
+    else:
+        return (output.name)
 
 def assembly(output, cwd, threads, read_mapping, od, fastq, fast5):
     jfc_out = tempfile.NamedTemporaryFile(dir=dirpathTEMP,suffix=".fasta", delete=False)
@@ -403,12 +409,12 @@ def assembly(output, cwd, threads, read_mapping, od, fastq, fast5):
     with open(kmer, "w") as fh:
         for record in SeqIO.parse(jfc_out.name, "fasta"):
             if int(record.id) > 10 and len(record.seq) == 100:
-                repetitive = 0
-                while 10 >= repetitive:
-                    repetitive += 1
-                    count += 1
-                    record.id = "kmer_" + str(count)
-                    SeqIO.write(record, fh, "fasta")
+                # repetitive = 0
+                # while 10 >= repetitive:
+                #     repetitive += 1
+                #     count += 1
+                #     record.id = "kmer_" + str(count)
+                SeqIO.write(record, fh, "fasta")
     print(kmer)
     tmp_dir = tempfile.mkdtemp(dir=dirpathTEMP)
     print("RUNNING SPADES")
@@ -533,18 +539,30 @@ def mlstget(species):
             patternsST.append([combination.split("\t")[0],"".join(combination.split("\t")[1:-1])])
     cmd_make = " ".join(["makeblastdb", "-dbtype","nucl","-in" , mlst_complete])
     makedb = sb.Popen(cmd_make, shell=True)
-    # print(cline)
     makedb.communicate()
     return(mlst_complete)
 
-def plothystogramSpecies(files_kt_list, blastdb, output, od, dict_species_all, name_table, dict_table_all, figure_file):
+def plothystogramSpecies(files_kt_list, blastdb, output, od):
     files_kt = " ".join(files_kt_list)
     k = KTIMPORTTAX % (blastdb, output + ".html", files_kt)
     print(k)
     ktimport = sb.Popen(k, shell=True, cwd=od)
     ktimport.communicate()
 
+def common_start(*s):
+    l = len(s)
+    if l == 0:
+        return None
+    elif l == 1:
+        return s[0]
 
+    start = s[0]
+    while start != "" and not all(ii.startswith(start) for ii in s[1:]):
+        start = start[:-1]
+
+    return start
+
+def histograplot(dict_species_all, name_table,dict_table_all, figure_file):
     species_pd = pd.DataFrame.from_dict(dict_species_all, orient='index')
     species_name_colors = [name for barcode in dict_species_all for name in dict_species_all[barcode]]
     species_name_colors = list(dict.fromkeys(species_name_colors))
@@ -569,24 +587,28 @@ def plothystogramSpecies(files_kt_list, blastdb, output, od, dict_species_all, n
 
 def main():
     print("PROGRAM STARTED")
-    args = setting()
-    global dirpathTEMP
+    # args = setting()
+    args = parser.parse_args()
     global dirpathTEMP
     dirpathTEMP = tempfile.mkdtemp(dir=args.temp)
+    temp = args.temp
     global verbose
     verbose = args.verbose
-
+    if args.update_ete:
+        ncbi.update_taxonomy_database()
     if args.species != "":
         fastamlst = mlstget(args.species)
     cwd = args.folder_fastq
     od = os.getcwd()
+    #number = int(args.output)
+
     Bio.Entrez.email = args.email
     new_string = re.sub("[^0-9a-zA-Z]+", "_", args.search)
     name_plot = args.output + ".pdf"
     name_table = args.output + ".xlsx"
     figure_file = os.path.join(od, name_plot)
     name_table = os.path.join(od, name_table)
-    #os.environ["BLASTDB"] = "/data2/blastdb"
+    os.environ["BLASTDB"] = "/data2/blastdb"
     blastdb = os.environ['BLASTDB']
     outputRacon = ""
     if args.search != "":
@@ -623,72 +645,58 @@ def main():
             blastalias = sb.Popen(cm, shell= True)
             blastalias.communicate()
     elif args.database != "":
+        #fasta_all = []
+        if os.path.isfile(os.path.join(blastdb, args.database)):
+            if args.database.endswith(".nal") or args.database.endswith(".Nal"):
+                database_name = os.path.join(blastdb, args.database)
+                interm = database_name.split(".")[:-1]
+                database_name = ".".join(interm)
+    elif args.database == "" and args.database_external != "":
         fasta_all = []
-        if os.path.isabs(args.database):
-            if args.database.endswith("fasta"):
-                for rec in SeqIO.parse(args.database, "fasta"):
-                    desc = rec.description
-                    if 200 < len(rec.seq) < 10000:
-                        single_elem = desc.split(" ")
-                        if not "sp." in single_elem[2]:
-                            if len(single_elem) >= 3:
-                                species = " ".join([single_elem[1], single_elem[2]])
-                                rec.description = species
-                                fasta_all.append(rec)
-                database_name = os.path.join(blastdb,args.database + "clean.fasta")
-                SeqIO.write(fasta_all, database_name , "fasta")
+        if args.database_external.endswith("fasta"):
+            for rec in SeqIO.parse(args.database, "fasta"):
+                desc = rec.description
+                if 200 < len(rec.seq) < 10000:
+                    single_elem = desc.split(" ")
+                    if not "sp." in single_elem[2]:
+                        if len(single_elem) >= 3:
+                            species = " ".join([single_elem[1], single_elem[2]])
+                            rec.description = species
+                            fasta_all.append(rec)
+            database_name = os.path.join(blastdb, args.database + "clean.fasta")
+            SeqIO.write(fasta_all, database_name, "fasta")
+            print("Using database %s" % database_name)
+        elif args.database_external.endswith(".nal") or args.database_external.endswith(".Nal"):
+            database_name_abs = os.path.abspath(args.database_external)
+            database_name_rel = os.path.join(blastdb, args.database_external)
+            if os.path.isfile(database_name_abs):
+                database_name = database_name_abs
+                interm = database_name.split(".")[:-1]
+                database_name = ".".join(interm)
                 print("Using database %s" % database_name)
-
-            elif args.database.endswith(".nal") or args.database.endswith(".Nal"):
-                database_name = os.path.abspath(args.database)
+            elif os.path.isfile(database_name_rel):
+                database_name = database_name_rel
                 interm = database_name.split(".")[:-1]
                 database_name = ".".join(interm)
                 print("Using database %s" % database_name)
             else:
-                print("DATABASE NOT FOUND")
-        elif os.path.isfile(os.path.abspath(args.database)):
-            database_name_orig = os.path.abspath(args.database)
-            if database_name_orig.endswith("fasta"):
-                for rec in SeqIO.parse(database_name_orig, "fasta"):
-                    desc = rec.description
-                    if 200 < len(rec.seq) < 10000:
-                        single_elem = desc.split(" ")
-                        if not "sp." in single_elem[2]:
-                            if len(single_elem) >= 3:
-                                species = " ".join([single_elem[1], single_elem[2]])
-                                rec.description = species
-                                fasta_all.append(rec)
-                database_name = os.path.join(blastdb,args.database + "clean.fasta")
-                print("Using database %s" % database_name)
-                SeqIO.write(fasta_all, database_name , "fasta")
-            elif database_name_orig.endswith(".nal") or database_name_orig.endswith(".Nal"):
-                interm = database_name_orig.split(".")[:-1]
-                database_name = ".".join(interm)
-            else:
-                print("DATABASE NOT FOUND")
-        elif os.path.isfile(os.path.join(blastdb, args.database)):
-            database_name_orig = os.path.join(blastdb, args.database)
-            if database_name_orig.endswith("fasta"):
-                for rec in SeqIO.parse(database_name_orig, "fasta"):
-                    desc = rec.description
-                    if 200 < len(rec.seq) < 10000:
-                        single_elem = desc.split(" ")
-                        if not "sp." in single_elem[2]:
-                            if len(single_elem) >= 3:
-                                species = " ".join([single_elem[1], single_elem[2]])
-                                rec.description = species
-                                fasta_all.append(rec)
-                database_name = os.path.join(blastdb, args.database + "clean.fasta")
-                print("Using database %s" % database_name)
-                SeqIO.write(fasta_all, database_name, "fasta")
-            elif database_name_orig.endswith(".nal") or database_name_orig.endswith(".Nal"):
-                interm = database_name_orig.split(".")[:-1]
-                database_name = ".".join(interm)
-                print("Using database %s" % database_name)
-            else:
-                print("DATABASE NOT FOUND")
+                interm = args.database_external.split(".")[:-1][0].split("/")[-1]
+                blastdbcmd_cmd = "blastdbcmd -db " + interm + " -info"
+                blastdbcmd = sb.Popen(blastdbcmd_cmd, shell=True, stderr=sb.PIPE, stdout=sb.PIPE)
+                out, err = blastdbcmd.communicate()
+                if err.decode() == "":
+                    database_name = os.path.join(blastdb, interm)
+                else:
+                    sys.exit("DATABASE NOT FOUND")
+
         else:
-            print("DATABASE NOT FOUND")
+            blastdbcmd_cmd = "blastdbcmd -db " + args.database_external + " -info"
+            blastdbcmd = sb.Popen(blastdbcmd_cmd, shell=True, stderr=sb.PIPE, stdout=sb.PIPE)
+            out, err = blastdbcmd.communicate()
+            if err.decode() == "":
+                database_name = os.path.join(blastdb, args.database_external)
+            else:
+                sys.exit("DATABASE NOT FOUND")
     else:
         database_name = os.path.join(blastdb, "nt")
         print("Using database %s" % database_name)
@@ -706,20 +714,48 @@ def main():
 
     else:
         list_barcode = [args.barcode]
-    dict_species_all = {}
     dict_table_all = {}
-    number_species = []
     files_kt_list = []
     mlstCount = {}
+    min, max = args.interval.split("-")
     for barcode in list_barcode:
+        list_species_verbose = []
+        rank_path = os.path.join(od, barcode + "_rank.txt")
+        count = 0
         dir_fastq = os.path.join(cwd, barcode)
         print("EXECUTING BARCODE: %s" % barcode)
         if os.path.exists(dir_fastq):
             if os.path.isfile(dir_fastq):
-                read_mapping = dir_fastq
+                reads_fastq = tempfile.NamedTemporaryFile(dir=dirpathTEMP, suffix=".fastq", delete=False, mode="w")
+                if dir_fastq.endswith("gz"):
+                    with gzip.open(dir_fastq, 'rt') as f:
+                        if args.subset > 0:
+                            for record in SeqIO.parse(f, "fastq"):
+                                if int(min) < len(record.seq) < int(max):
+                                    if count < args.subset:
+                                        count += 1
+                                        SeqIO.write(record, reads_fastq, "fastq")
+                        else:
+                            for record in SeqIO.parse(f, "fastq"):
+                                if int(min) < len(record.seq) < int(max):
+                                    SeqIO.write(record, reads_fastq, "fastq")
+                elif dir_fastq.endswith("fastq"):
+                    if args.subset > 0:
+                        for record in SeqIO.parse(dir_fastq, "fastq"):
+                            if int(min) < len(record.seq) < int(max):
+                                if count < args.subset:
+                                    count += 1
+                                    SeqIO.write(record, reads_fastq, "fastq")
+                    else:
+                        for record in SeqIO.parse(dir_fastq, "fastq"):
+                            if int(min) < len(record.seq) < int(max):
+                                SeqIO.write(record, reads_fastq, "fastq")
+                else:
+                    print("UNKNOWN BARCODE TYPE. ACCEPTED FILES OR FOLDERS")
+                read_mapping = reads_fastq.name
                 if verbose:
                     print(read_mapping)
-            else:
+            elif os.path.isdir(dir_fastq):
                 for root, dirs, files in os.walk(dir_fastq, topdown=False):
                     reads_fastq = tempfile.NamedTemporaryFile(dir=dirpathTEMP, suffix=".fastq", delete=False)
                     with open(reads_fastq.name, "w") as outfile:
@@ -729,23 +765,32 @@ def main():
                                 with gzip.open(filename, 'rb') as infile:
                                     for line in infile:
                                         outfile.write(line.decode())
-
-                read_mapping = reads_fastq.name
-            reads_porechop = tempfile.NamedTemporaryFile(dir=dirpathTEMP, suffix=".fastq", delete=False)
-            min, max = args.interval.split("-")
-            count = 0
-            with open(reads_porechop.name, "w") as fh:
-                for record in SeqIO.parse(read_mapping, "fastq"):
-                    if int(min) < len(record.seq) < int(max):
-                        if args.subset > 0:
+                            elif filename.endswith("fastq"):
+                                filename = os.path.join(cwd, barcode, filename)
+                                with open(filename, 'rb') as infile:
+                                    for line in infile:
+                                        outfile.write(line.decode())
+                reads_fastq_select = tempfile.NamedTemporaryFile(dir=dirpathTEMP, suffix=".fastq", delete=False, mode="w")
+                if args.subset > 0:
+                    for record in SeqIO.parse(reads_fastq.name, "fastq"):
+                        if int(min) < len(record.seq) < int(max):
                             if count < args.subset:
                                 count += 1
-                                SeqIO.write(record, fh, "fastq")
-                        else:
-                            SeqIO.write(record, fh, "fastq")
+                                SeqIO.write(record, reads_fastq_select, "fastq")
+                else:
+                    for record in SeqIO.parse(reads_fastq.name, "fastq"):
+                        if int(min) < len(record.seq) < int(max):
+                            SeqIO.write(record, reads_fastq_select, "fastq")
+
+                read_mapping = reads_fastq_select.name
+            else:
+                print("UNKNOWN BARCODE TYPE. ACCEPTED FILES OR FOLDERS")
+            reads_porechop = tempfile.NamedTemporaryFile(dir=dirpathTEMP, suffix=".fastq", delete=False)
+
+            count = 0
             print("RUNNING PORECHOP")
             reads_porechop_1 = tempfile.NamedTemporaryFile(dir=dirpathTEMP, suffix=".fastq", delete=False)
-            porechop_cmd = PORECHOP % (reads_porechop.name, args.threads, reads_porechop_1.name)
+            porechop_cmd = PORECHOP % (read_mapping, args.threads, reads_porechop_1.name)
             porechop = sb.Popen(porechop_cmd, shell=True, cwd=cwd, stderr=sb.PIPE, stdout=sb.PIPE)
             porechop.communicate()
             result_blast = False
@@ -760,22 +805,25 @@ def main():
                             print("USING " + barcode_corr + " FOR BLAST")
                         for record in SeqIO.parse(barcode_corr, "fasta"):
                             if record.seq != "":
-                                fp = tempfile.NamedTemporaryFile(dir=dirpathTEMP, suffix=".fasta", mode="w", delete=False)
-                                fo = tempfile.NamedTemporaryFile(dir=dirpathTEMP, mode="w", prefix=barcode,
-                                                                 suffix=".blastn", delete=False)
+                                fp = os.path.join(dirpathTEMP,
+                                                  record.id + ".fasta")  # tempfile.NamedTemporaryFile(dir=dirpathTEMP, suffix=".fasta", mode="w", delete=False)
+                                fo = os.path.join(temp,
+                                                  record.id + ".blastn")
                                 SeqIO.write(record, fp, "fasta")
-                                fastx_all.append([fp.name, database_name, fo.name])
+                                fastx_all.append([fp, database_name, fo, args.verbose])
                     else:
                         fastx_all = []
                         if verbose:
                             print("USING " + reads_porechop_1.name + " FOR BLAST")
                         for record in SeqIO.parse(reads_porechop_1.name, "fastq"):
                             if record.seq != "":
-                                fp = tempfile.NamedTemporaryFile(dir=dirpathTEMP, suffix=".fasta", mode="w", delete=False)
-                                fo = tempfile.NamedTemporaryFile(dir=dirpathTEMP, mode="w", prefix=barcode,
-                                                                 suffix=".blastn", delete=False)
+                                fp = os.path.join(dirpathTEMP,
+                                                  record.id + ".fasta")  # tempfile.NamedTemporaryFile(dir=dirpathTEMP, suffix=".fasta", mode="w", delete=False)
+                                fo = os.path.join(temp,
+                                                  record.id + ".blastn")  # tempfile.NamedTemporaryFile(dir=dirpathTEMP, mode="w", prefix=barcode, suffix=".blastn",
+
                                 SeqIO.write(record, fp, "fasta")
-                                fastx_all.append([fp.name, database_name, fo.name])
+                                fastx_all.append([fp, database_name, fo, args.verbose])
                                 if not barcode.endswith("raw"):
                                     if barcode.endswith("/"):
                                         barcode = barcode.split("/")[-2] + "raw"
@@ -794,21 +842,26 @@ def main():
                             if assembled != "":
                                 for record in SeqIO.parse(assembled, "fasta"):
                                     if record.seq != "":
-                                        fp = tempfile.NamedTemporaryFile(dir=dirpathTEMP, suffix=".fasta", mode="w", delete=False)
-                                        fo = tempfile.NamedTemporaryFile(dir=dirpathTEMP, mode="w", prefix=barcode, suffix=".blastn", delete=False)
+                                        fp = os.path.join(dirpathTEMP,
+                                                          record.id + ".fasta")  # tempfile.NamedTemporaryFile(dir=dirpathTEMP, suffix=".fasta", mode="w", delete=False)
+                                        fo = os.path.join(temp,
+                                                          record.id + ".blastn")  # tempfile.NamedTemporaryFile(dir=dirpathTEMP, mode="w", prefix=barcode, suffix=".blastn",
                                         SeqIO.write(record, fp, "fasta")
-                                        fastx_all.append([fp.name, database_name, fo.name])
+                                        fastx_all.append([fp, database_name, fo, args.verbose])
                             else:
                                 continue
             else:
                 if verbose:
                     print("USING " + reads_porechop_1.name + " FOR BLAST")
+                fastx_all = []
                 for record in SeqIO.parse(reads_porechop_1.name, "fastq"):
                     if record.seq != "":
-                        fp = tempfile.NamedTemporaryFile(dir=dirpathTEMP, suffix=".fasta", mode="w", delete=False)
-                        fo = tempfile.NamedTemporaryFile(dir=dirpathTEMP, mode="w", prefix=barcode, suffix=".blastn", delete=False)
+                        fp = os.path.join(dirpathTEMP, record.id + ".fasta")# tempfile.NamedTemporaryFile(dir=dirpathTEMP, suffix=".fasta", mode="w", delete=False)
+                        fo = os.path.join(temp, record.id + ".blastn") #tempfile.NamedTemporaryFile(dir=dirpathTEMP, mode="w", prefix=barcode, suffix=".blastn",
+                        # fp = tempfile.NamedTemporaryFile(dir=dirpathTEMP, suffix=".fasta", mode="w", delete=False)
+                        # fo = tempfile.NamedTemporaryFile(dir=dirpathTEMP, mode="w", prefix=barcode, suffix=".blastn", delete=False)
                         SeqIO.write(record, fp, "fasta")
-                        fastx_all.append([fp.name, database_name,fo.name])
+                        fastx_all.append([fp, database_name,fo, args.verbose])
                         if not barcode.endswith("raw"):
                             if barcode.endswith("/"):
                                 barcode = barcode.split("/")[-2]+ "raw"
@@ -825,11 +878,11 @@ def main():
                 hystogram = []
                 for record in SeqIO.parse(outputRacon, "fasta"):
                     if record.seq != "":
-                        fp = tempfile.NamedTemporaryFile(dir=dirpathTEMP, suffix=".fasta", mode="w", delete=False)
-                        fo = tempfile.NamedTemporaryFile(dir=dirpathTEMP, mode="w", prefix=barcode, suffix=".blastn",
-                                                         delete=False)
+                        fp = os.path.join(dirpathTEMP, record.id + ".fasta")# tempfile.NamedTemporaryFile(dir=dirpathTEMP, suffix=".fasta", mode="w", delete=False)
+                        fo = os.path.join(temp, record.id + ".blastn") #tempfile.NamedTemporaryFile(dir=dirpathTEMP, mode="w", prefix=barcode, suffix=".blastn",
+                                                        # delete=False)
                         SeqIO.write(record, fp, "fasta")
-                        correct_racon_blast.append([fp.name, fastamlst,fo.name])
+                        correct_racon_blast.append([fp, fastamlst,fo, args.verbose])
 
                 with Pool(processes=args.threads) as pool:
                     for result in tqdm(pool.imap(func=blast, iterable=correct_racon_blast), total=len(correct_racon_blast)):
@@ -847,116 +900,155 @@ def main():
                 for result in tqdm(pool.imap(func=blast, iterable=fastx_all), total=len(fastx_all)):
                     result_list.append(result)
             result_list_tqdm = []
-            name_blast = os.path.join(od, args.output + barcode + ".blast.txt")
-            with open(name_blast, "w") as new_file:
-                for name in result_list:
-                    data_single_file = []
-                    with open(name) as f:
-                        for line in f:
-                            new_file.write(line)
-                            data_single_file.append(line)
-                        new_file.write("\n")
-                    blast_out_signle = "\n".join(data_single_file)
-                    result_list_tqdm.append(blast_out_signle)
-                    if not args.verbose:
-                        os.remove(name)
-            for line in result_list_tqdm:
-                if line != "" and not result_blast:
-                    result_blast = True
-            if not result_blast:
-                continue
-            read_best_hit = {}
-            for output in result_list_tqdm:
-                if output != "":
-                    align_species = {}
-                    align = output.split("\n")
-                    for single_align in align:
-                        align_elm = single_align.split("\t")
-                        if len(single_align) > 3:
-                            align_species_score = {}
-                            read = align_elm[0]
-                            score = float(align_elm[2])
-                            align_species_score[align_elm[4]] =  [align_elm[3]]
-                            if align_elm[3] != "N/A":
-                                if score > 200 and float(align_elm[4]) >= args.percentage :
-                                    if score in align_species:
-                                        for key in  align_species[score]:
-                                            if align_elm[4] in align_species_score:
-                                                align_species[score][key].append(align_elm[3])
-                                            else:
-                                                align_species[score][key] = [align_elm[3]]
+            #with open(name_blast, "w") as new_file:
+            dict_species_new ={}
+            count_total = 0
+            count_anbiguous = 0
+
+            barcode_all_excel =  os.path.join(od, barcode + "_blastn_results.txt")
+            with open(barcode_all_excel, 'w') as file:
+                input_lines = fileinput.input(result_list)
+                file.writelines(input_lines)
+
+            for name in result_list:
+                count_total += 1
+                species = ""
+                unambiguous = True
+                with open(name) as f:
+                    for line in f:
+                        #qseqid sseqid bitscore sscinames pident evalue staxids qlen
+                        # desired_ranks = ['kingdom', 'phylum', 'class', 'order', 'family', 'genus', 'species']
+                        qseqid,sseqid,bitscore,sscinames,pident,evalue,staxids,qlen = line.rstrip().split("\t")
+                        if staxids != "0":
+                            try:
+                                lineage = ncbi.get_lineage(staxids)
+                            except:
+                                print("TAXID "+ str(staxids) + " NOT FOUND")
+                                lineage = []
+                            if species == "" and unambiguous:
+                                species = [staxids,bitscore,qseqid, pident, qseqid,sseqid,lineage]
+                                staxidsC, bitscoreC, qseqidC, pidentC,qseqidC,sseqidC, lineageC = species
+                            else:
+                                if unambiguous and bitscoreC < bitscore:
+                                    species = [staxids, bitscore,bitscore,pident, qseqid,sseqid,lineage]
+                                    staxidsC, bitscoreC, qseqidC, pidentC, qseqidC,sseqidC, lineageC = species
+                                elif unambiguous and bitscoreC == bitscore and staxidsC != staxids and len(lineage) > 1:
+                                    if unambiguous and pidentC < pident:
+                                        species = [staxids, bitscore, bitscore, pident, qseqid,sseqid, lineage]
+                                        staxidsC, bitscoreC, qseqidC, pidentC, qseqidC,sseqidC,lineageC = species
                                     else:
-                                        align_species[score] = align_species_score
-                    if align_species:
-                        list_align_species = list(align_species.items())
-                        list_align_species.sort(reverse=True)
-                        align_species_ident = list_align_species[0][1]
-                        list_align_species_b = list(align_species_ident.items())
-                        list_align_species_b.sort(reverse=True)
-                        align_species_ident_b = list_align_species_b[0][1]
-                        read_best_hit[read] = align_species_ident_b
-            dict_match = []
-            for match in read_best_hit:
-                dict_match.append([match, read_best_hit[match]])
-            result_list_tqdm = []
-            with Pool(processes=args.threads) as pool:
-                for result in tqdm(pool.imap(func=counpute_count, iterable=dict_match), total=len(dict_match)):
-                    result_list_tqdm.append(result)
-
-
-            kt_barcode = tempfile.NamedTemporaryFile(dir=dirpathTEMP,suffix=".txt", prefix=barcode, delete=False, mode = "w")
-            files_kt_list.append(kt_barcode.name)
-            for value in result_list_tqdm:
-                for key in value[0]:
-                    read = value[0][key][0]
-                    taxid = ncbi.get_name_translator([key])
-                    if bool(taxid):
+                                        lineage_old = "_".join(list(map(str,lineageC)))
+                                        lineage_new = "_".join(list(map(str,lineage)))
+                                        both_lineage = {lineage_old, lineage_new}
+                                        common_taxid = common_start(*both_lineage)
+                                        if "_" in common_taxid and len(common_taxid.split("_")) >= 2:
+                                            common_taxid_uniq = common_taxid.split("_")[-2]
+                                            species = [common_taxid_uniq, bitscore, bitscore, pident, qseqid,sseqid, ncbi.get_lineage(common_taxid_uniq)]
+                                        else:
+                                            species = []
+                                            continue
+                        if staxids == "0" and sscinames == "N/A":
+                            if ":" in sseqid:
+                                staxids = sseqid.split(":")[0]
+                                sscinames = ncbi.get_taxid_translator(staxids)
+                                try:
+                                    lineage = ncbi.get_lineage(staxids)
+                                except:
+                                    print("TAXID " + str(staxids) + " NOT FOUND")
+                                    lineage = []
+                                if species == "" and unambiguous:
+                                    species = [staxids, bitscore, qseqid, pident, qseqid, sseqid, lineage]
+                                    staxidsC, bitscoreC, qseqidC, pidentC, qseqidC, sseqidC, lineageC = species
+                                else:
+                                    if unambiguous and bitscoreC < bitscore:
+                                        species = [staxids, bitscore, bitscore, pident, qseqid, sseqid, lineage]
+                                        staxidsC, bitscoreC, qseqidC, pidentC, qseqidC, sseqidC, lineageC = species
+                                    elif unambiguous and bitscoreC == bitscore and staxidsC != staxids and len(
+                                            lineage) > 1:
+                                        if unambiguous and pidentC < pident:
+                                            species = [staxids, bitscore, bitscore, pident, qseqid, sseqid, lineage]
+                                            staxidsC, bitscoreC, qseqidC, pidentC, qseqidC, sseqidC, lineageC = species
+                                        else:
+                                            lineage_old = "_".join(list(map(str, lineageC)))
+                                            lineage_new = "_".join(list(map(str, lineage)))
+                                            both_lineage = {lineage_old, lineage_new}
+                                            common_taxid = common_start(*both_lineage)
+                                            if "_" in common_taxid and len(common_taxid.split("_")) >= 2:
+                                                common_taxid_uniq = common_taxid.split("_")[-2]
+                                                species = [common_taxid_uniq, bitscore, bitscore, pident, qseqid,
+                                                           sseqid, ncbi.get_lineage(common_taxid_uniq)]
+                                            else:
+                                                species = []
+                                                continue
+                    if len(species) == 7:
+                        if args.verbose:
+                            list_species_verbose.append(species)
+                        if species[0] in dict_species_new:
+                            dict_species_new[species[0]] = dict_species_new[species[0]] + 1
+                        else:
+                            dict_species_new[species[0]] = 1
+                if not args.verbose:
+                    os.remove(name)
+            if args.verbose:
+                name_ranks = os.path.join(od, args.output + barcode + ".full_ranks.txt")
+                with open(name_ranks, "w") as fh:
+                    for line in list_species_verbose:
                         try:
-                            species_count = str(taxid[key][0]).split(";")[0]
-                            kt_barcode.write(read + "\t" + species_count + "\n")
+                            taxname = ncbi.get_taxid_translator([str(line[0])])
+                            seqid = line[4]
+                            fh.write("\t".join([(list(taxname.values()))[0],seqid + "\n"]))
                         except:
-                            print("NO TAXID FOR " + taxid[key][0])
-                            continue
-            species_dict = {}
-            genera_dict = {}
-            for result in result_list_tqdm:
-                sp = list(result[0].keys())
-                gen = list(result[1].keys())
-                if len(sp) > 0:
-                    if sp[0] in species_dict:
-                        species_dict[sp[0]] = species_dict[sp[0]]+ 1
-                    else:
-                        species_dict[sp[0]] = 1
-                if len(gen) > 0:
-                    if gen[0] in genera_dict:
-                        genera_dict[gen[0]] = [genera_dict[gen[0]][0] + 1]
-                    else:
-                        genera_dict[gen[0]] = [1]
-            total_reads_mapped = sum(species_dict.values())
-            min_value = total_reads_mapped * (float(args.min)/100)
-            if min_value < 1 :
-                if not args.assemble:
-                    min_value = 1
-            print("minimum number of reads used " + str(min_value))
-            species_retain = {}
-            specied_final = {}
-            for key in species_dict:
-                current_value = species_dict[key]
-                if current_value >= min_value:#float(args.min):
-                    species_retain[key] = species_dict[key]
-            for key in species_retain:
-                specied_final[key] = species_retain[key] / sum(species_retain.values()) * 100
-                number_species.append(key)
-            dict_species_all[barcode] = specied_final
-            dict_table_all[barcode] = dict(sorted(species_dict.items(), key=lambda item : item[1]))
-
+                            print("RANK NOT FOUND")
+            dict_name = {}
+            desired_ranks = ["species","genus","family","order","class","phylum","clade","superkingdom","subspecies","species subgroup","species group"]
+            for key in dict_species_new:
+                try:
+                    name_species = ncbi.get_taxid_translator([key])
+                    speciesname = (list(name_species.values()))[0]
+                except:
+                    speciesname = key
+                dict_name[speciesname] = dict_species_new[key]
+            dict_table_all[barcode] = dict_name
+            kt_barcode = tempfile.NamedTemporaryFile(dir=dirpathTEMP,suffix=".txt", prefix=barcode, delete=False)
+            files_kt_list.append(kt_barcode.name)
+            seq_count = 0
+            total = 0
+            for key in dict_species_new:
+                total +=  dict_species_new[key]
+            min_value_to_use = (int(total) * int(args.min) / 100)
+            with open(kt_barcode.name, "w") as fh:
+                print(kt_barcode.name)
+                for key in dict_species_new:
+                    if min_value_to_use < dict_species_new[key]:
+                        count_rep = dict_species_new[key]
+                        seq_rep = 0
+                        while seq_rep < count_rep:
+                            seq_rep +=1
+                            match = "seq" + str(seq_count) + "\t" + str(key) + "\n"
+                            seq_count =+ 1
+                            fh.write(match)
+            taxid_list = [(key, dict_species_new[key]) for key in dict_species_new]
+            taxid_dict_rank = desired_rank_file(taxid_list, desired_ranks)#, rank_path)
+            taxid_pd_rank = pd.DataFrame.from_dict(taxid_dict_rank, orient='index')
+            #taxid_pd_rank.drop(axis=1)
+            taxid_pd_rank['abundance']  = (taxid_pd_rank['abundance'] / taxid_pd_rank['abundance'].sum())
+            taxid_pd_rank[taxid_pd_rank['abundance']  < args.min / 100] = None
+            taxid_pd_rank.dropna(subset=['abundance'], inplace=True)
+            #taxid_pd_rank[taxid_pd_rank['abundance'] != 'NA']
+            taxid_pd_rank.to_csv(rank_path,sep="\t",index=False)
+            # print("ok")
         else:
             print("PATH FOR BARCODE " + barcode + " DO NOT EXISTS. CHECK BARCODE NAME OR PATH" )
+
+
+
+    species_abs = pd.DataFrame.from_dict(dict_table_all, orient='index')
+    species_abs.fillna(0)
+    species_abs.transpose().to_excel(name_table)
     if len(files_kt_list) > 0:
-        plothystogramSpecies(files_kt_list,blastdb,args.output,od,dict_species_all,name_table,dict_table_all,figure_file)
+        plothystogramSpecies(files_kt_list,blastdb,args.output,od)
     else:
         print("NOTHING TO PLOT")
-
 
 if __name__ == '__main__':
     main()
