@@ -23,13 +23,13 @@ RUN pip3 install tqdm
 
 RUN apt-get install -y python3-matplotlib
 
-RUN apt-get install -y libxmu-dev libxmu-headers freeglut3-dev libxext-dev libxi-dev libhts-dev
+RUN apt-get install -y libxmu-dev libxmu-headers freeglut3-dev libxext-dev libxi-dev libhts-dev zlib1g-dev bamtools
 
 RUN git clone https://github.com/rrwick/Porechop.git && cd Porechop && python3 setup.py install
 
-RUN git clone --recursive https://github.com/jts/nanopolish.git && cd nanopolish && make
+#RUN git clone --recursive https://github.com/jts/nanopolish.git && cd nanopolish && make
 
-RUN apt-get install -y bgzip
+RUN apt-get install -y tabix
 
 ENV BLASTDB = "/data/blastdb"
 

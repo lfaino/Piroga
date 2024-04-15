@@ -113,6 +113,82 @@ parser.add_argument("-v",'--verbose', help='be verbose', dest='verbose', action=
 
 #args = parser.parse_args()
     #return args
+def parse_blast(name):
+        species = ""
+        unambiguous = True
+        with open(name) as f:
+            for line in f:
+                # qseqid sseqid bitscore sscinames pident evalue staxids qlen
+                # desired_ranks = ['kingdom', 'phylum', 'class', 'order', 'family', 'genus', 'species']
+                qseqid, sseqid, bitscore, sscinames, pident, evalue, staxids, qlen = line.rstrip().split("\t")
+                if staxids != "0":
+                    try:
+                        lineage = ncbi.get_lineage(staxids)
+                    except:
+                        print("TAXID " + str(staxids) + " NOT FOUND")
+                        lineage = []
+                    if species == "" and unambiguous:
+                        species = [staxids, bitscore, qseqid, pident, qseqid, sseqid, lineage]
+                        staxidsC, bitscoreC, qseqidC, pidentC, qseqidC, sseqidC, lineageC = species
+                    else:
+                        if unambiguous and bitscoreC < bitscore:
+                            species = [staxids, bitscore, bitscore, pident, qseqid, sseqid, lineage]
+                            staxidsC, bitscoreC, qseqidC, pidentC, qseqidC, sseqidC, lineageC = species
+                        elif unambiguous and bitscoreC == bitscore and staxidsC != staxids and len(lineage) > 1:
+                            if unambiguous and pidentC < pident:
+                                species = [staxids, bitscore, bitscore, pident, qseqid, sseqid, lineage]
+                                staxidsC, bitscoreC, qseqidC, pidentC, qseqidC, sseqidC, lineageC = species
+                            else:
+                                lineage_old = "_".join(list(map(str, lineageC)))
+                                lineage_new = "_".join(list(map(str, lineage)))
+                                both_lineage = {lineage_old, lineage_new}
+                                common_taxid = common_start(*both_lineage)
+                                if "_" in common_taxid and len(common_taxid.split("_")) >= 2:
+                                    common_taxid_uniq = common_taxid.split("_")[-2]
+                                    species = [common_taxid_uniq, bitscore, bitscore, pident, qseqid, sseqid,
+                                               ncbi.get_lineage(common_taxid_uniq)]
+                                else:
+                                    species = []
+                                    continue
+                if staxids == "0" and sscinames == "N/A":
+                    if ":" in sseqid:
+                        staxids = sseqid.split(":")[0]
+                        sscinames = ncbi.get_taxid_translator(staxids)
+                        try:
+                            lineage = ncbi.get_lineage(staxids)
+                        except:
+                            print("TAXID " + str(staxids) + " NOT FOUND")
+                            lineage = []
+                        if species == "" and unambiguous:
+                            species = [staxids, bitscore, qseqid, pident, qseqid, sseqid, lineage]
+                            staxidsC, bitscoreC, qseqidC, pidentC, qseqidC, sseqidC, lineageC = species
+                        else:
+                            if unambiguous and bitscoreC < bitscore:
+                                species = [staxids, bitscore, bitscore, pident, qseqid, sseqid, lineage]
+                                staxidsC, bitscoreC, qseqidC, pidentC, qseqidC, sseqidC, lineageC = species
+                            elif unambiguous and bitscoreC == bitscore and staxidsC != staxids and len(
+                                    lineage) > 1:
+                                if unambiguous and pidentC < pident:
+                                    species = [staxids, bitscore, bitscore, pident, qseqid, sseqid, lineage]
+                                    staxidsC, bitscoreC, qseqidC, pidentC, qseqidC, sseqidC, lineageC = species
+                                else:
+                                    lineage_old = "_".join(list(map(str, lineageC)))
+                                    lineage_new = "_".join(list(map(str, lineage)))
+                                    both_lineage = {lineage_old, lineage_new}
+                                    common_taxid = common_start(*both_lineage)
+                                    if "_" in common_taxid and len(common_taxid.split("_")) >= 2:
+                                        common_taxid_uniq = common_taxid.split("_")[-2]
+                                        species = [common_taxid_uniq, bitscore, bitscore, pident, qseqid,
+                                                   sseqid, ncbi.get_lineage(common_taxid_uniq)]
+                                    else:
+                                        species = []
+                                        continue
+
+
+        if not verbose:
+            os.remove(name)
+        return (species)
+
 
 def get_desired_ranks(taxid, desired_ranks):
     value_taxid, score = taxid
@@ -899,96 +975,26 @@ def main():
             with Pool(processes=args.threads) as pool:
                 for result in tqdm(pool.imap(func=blast, iterable=fastx_all), total=len(fastx_all)):
                     result_list.append(result)
-            result_list_tqdm = []
-            #with open(name_blast, "w") as new_file:
             dict_species_new ={}
-            count_total = 0
-            count_anbiguous = 0
-
             barcode_all_excel =  os.path.join(od, barcode + "_blastn_results.txt")
             with open(barcode_all_excel, 'w') as file:
                 input_lines = fileinput.input(result_list)
                 file.writelines(input_lines)
 
-            for name in result_list:
-                count_total += 1
-                species = ""
-                unambiguous = True
-                with open(name) as f:
-                    for line in f:
-                        #qseqid sseqid bitscore sscinames pident evalue staxids qlen
-                        # desired_ranks = ['kingdom', 'phylum', 'class', 'order', 'family', 'genus', 'species']
-                        qseqid,sseqid,bitscore,sscinames,pident,evalue,staxids,qlen = line.rstrip().split("\t")
-                        if staxids != "0":
-                            try:
-                                lineage = ncbi.get_lineage(staxids)
-                            except:
-                                print("TAXID "+ str(staxids) + " NOT FOUND")
-                                lineage = []
-                            if species == "" and unambiguous:
-                                species = [staxids,bitscore,qseqid, pident, qseqid,sseqid,lineage]
-                                staxidsC, bitscoreC, qseqidC, pidentC,qseqidC,sseqidC, lineageC = species
-                            else:
-                                if unambiguous and bitscoreC < bitscore:
-                                    species = [staxids, bitscore,bitscore,pident, qseqid,sseqid,lineage]
-                                    staxidsC, bitscoreC, qseqidC, pidentC, qseqidC,sseqidC, lineageC = species
-                                elif unambiguous and bitscoreC == bitscore and staxidsC != staxids and len(lineage) > 1:
-                                    if unambiguous and pidentC < pident:
-                                        species = [staxids, bitscore, bitscore, pident, qseqid,sseqid, lineage]
-                                        staxidsC, bitscoreC, qseqidC, pidentC, qseqidC,sseqidC,lineageC = species
-                                    else:
-                                        lineage_old = "_".join(list(map(str,lineageC)))
-                                        lineage_new = "_".join(list(map(str,lineage)))
-                                        both_lineage = {lineage_old, lineage_new}
-                                        common_taxid = common_start(*both_lineage)
-                                        if "_" in common_taxid and len(common_taxid.split("_")) >= 2:
-                                            common_taxid_uniq = common_taxid.split("_")[-2]
-                                            species = [common_taxid_uniq, bitscore, bitscore, pident, qseqid,sseqid, ncbi.get_lineage(common_taxid_uniq)]
-                                        else:
-                                            species = []
-                                            continue
-                        if staxids == "0" and sscinames == "N/A":
-                            if ":" in sseqid:
-                                staxids = sseqid.split(":")[0]
-                                sscinames = ncbi.get_taxid_translator(staxids)
-                                try:
-                                    lineage = ncbi.get_lineage(staxids)
-                                except:
-                                    print("TAXID " + str(staxids) + " NOT FOUND")
-                                    lineage = []
-                                if species == "" and unambiguous:
-                                    species = [staxids, bitscore, qseqid, pident, qseqid, sseqid, lineage]
-                                    staxidsC, bitscoreC, qseqidC, pidentC, qseqidC, sseqidC, lineageC = species
-                                else:
-                                    if unambiguous and bitscoreC < bitscore:
-                                        species = [staxids, bitscore, bitscore, pident, qseqid, sseqid, lineage]
-                                        staxidsC, bitscoreC, qseqidC, pidentC, qseqidC, sseqidC, lineageC = species
-                                    elif unambiguous and bitscoreC == bitscore and staxidsC != staxids and len(
-                                            lineage) > 1:
-                                        if unambiguous and pidentC < pident:
-                                            species = [staxids, bitscore, bitscore, pident, qseqid, sseqid, lineage]
-                                            staxidsC, bitscoreC, qseqidC, pidentC, qseqidC, sseqidC, lineageC = species
-                                        else:
-                                            lineage_old = "_".join(list(map(str, lineageC)))
-                                            lineage_new = "_".join(list(map(str, lineage)))
-                                            both_lineage = {lineage_old, lineage_new}
-                                            common_taxid = common_start(*both_lineage)
-                                            if "_" in common_taxid and len(common_taxid.split("_")) >= 2:
-                                                common_taxid_uniq = common_taxid.split("_")[-2]
-                                                species = [common_taxid_uniq, bitscore, bitscore, pident, qseqid,
-                                                           sseqid, ncbi.get_lineage(common_taxid_uniq)]
-                                            else:
-                                                species = []
-                                                continue
-                    if len(species) == 7:
-                        if args.verbose:
-                            list_species_verbose.append(species)
-                        if species[0] in dict_species_new:
-                            dict_species_new[species[0]] = dict_species_new[species[0]] + 1
-                        else:
-                            dict_species_new[species[0]] = 1
-                if not args.verbose:
-                    os.remove(name)
+            blastn_results = []
+            with Pool(processes=args.threads) as pool:
+                for result in tqdm(pool.imap(func=parse_blast, iterable=result_list), total=len(result_list)):
+                    blastn_results.append(result)
+
+            for species in blastn_results:
+                if len(species) == 7:
+                    if verbose:
+                        list_species_verbose.append(species)
+                    if species[0] in dict_species_new:
+                        dict_species_new[species[0]] = dict_species_new[species[0]] + 1
+                    else:
+                        dict_species_new[species[0]] = 1
+
             if args.verbose:
                 name_ranks = os.path.join(od, args.output + barcode + ".full_ranks.txt")
                 with open(name_ranks, "w") as fh:
