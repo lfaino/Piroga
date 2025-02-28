@@ -1,17 +1,15 @@
 import argparse
 import sys
+import time
 import uuid
 import fileinput
-import random
 import string
-from matplotlib import pyplot as plt
 import matplotlib
 import subprocess as sb
 import re
 import Bio
 from collections import Counter
 import gzip
-from Bio.Seq import Seq
 from Bio.Align.Applications import MafftCommandline
 from itertools import chain
 from Bio import AlignIO
@@ -19,31 +17,40 @@ from Bio.Align import MultipleSeqAlignment
 from Bio.Align.AlignInfo import SummaryInfo
 import os
 from Bio import Entrez
+import random
 from Bio import SeqIO
-from Bio.Blast.Applications import NcbimakeblastdbCommandline
+import seaborn as sns
+import matplotlib.pyplot as plt
 from multiprocessing import Pool
 from io import StringIO
+import shutil
 from tqdm import tqdm
 import tempfile
 import pandas as pd
 from matplotlib.colors import LinearSegmentedColormap
-from Bio.SeqRecord import SeqRecord
+from simple_slurm import Slurm
 from ete4 import NCBITaxa
 import requests
 import xml.etree.ElementTree as ET
+import resource
+
+resource.setrlimit(
+    resource.RLIMIT_CORE,
+    (resource.RLIM_INFINITY, resource.RLIM_INFINITY))
 
 import warnings
 warnings.filterwarnings("ignore")
 
 
+
 matplotlib.style.use('ggplot')
 KTIMPORTTAX = "ktImportTaxonomy -tax %s -o %s %s"
-MINIMAP = "minimap2 -x ava-ont -t %s %s %s | gzip -1 > %s"
+MINIMAP = "minimap2 -x ava-ont -t %s -N %s %s %s > %s"
 MINIMAP_S = "minimap2 -a -x map-ont --secondary=no -t %s %s %s "
 MINIMAP_SY = "minimap2 -a -x map-ont -t %s %s %s "
 SAMSORT = "samtools sort -o %s -O BAM"
 SAMINDEX = "samtools index %s"
-RACON = "racon -t %s -f %s %s %s"
+RACON = "racon -t %s -u -f %s %s %s"
 PORECHOP = "porechop -i %s -t %s -o %s"
 JELLYFISH_COUNT= "jellyfish count -m 100 -s 100M -t 10 -o /dev/stdout -C %s"
 JELLYFISH_DUMP= "jellyfish dump -o %s /dev/stdin"
@@ -62,16 +69,18 @@ FREEBAYES = "freebayes -f %s -p 1 %s"
 KROCUS_D = "krocus_database_downloader --species %s"
 BGZIP = "bgzip %s"
 TABIX = "tabix -p vcf %s"
+BLASTN = "blastn -db %s -query %s -max_target_seqs 10 -evalue 0.001 -out %s -outfmt \"6 qseqid sseqid bitscore sscinames pident evalue staxids qlen\""
 
 mlst_database = "https://pubmlst.org/data/dbases.xml"
 
 ncbi = NCBITaxa()
-#def setting():
+
 parser = argparse.ArgumentParser(prog='quantify and detect pathogens', usage='%(prog)s [options]')
 parser.add_argument("-o","--output", nargs="?", default="output", help="output name")
 parser.add_argument("-r", "--retmax", nargs="?", type = int, default="100000", help="number of id to retrieve per itaration")
 parser.add_argument("--barcode", help="barcode to analyse", required=True)
-parser.add_argument("-f5","--folder_fast5", help="folder containing fast5 files",default="/data/sharedata/")
+parser.add_argument("-f5","--folder_fast5", help="folder containing fast5 files",default="/mnt/data3ZEUSPV/SequenceData/")
+parser.add_argument("-cwd","--working_directory", help="working directory",default="")
 parser.add_argument("-t", "--threads", nargs="?", type = int, default="10", help="number of threads")
 parser.add_argument("-d", "--database", nargs="?", choices=['Plant_Bacteria_Funghi.nal', 'nt.nal', 'ITS_16S_18S_28S_LSU_SSU.nal',
                                                             'Metazoa_Organism_OR_metazoa_All_Fields_.nal','Xanthomonas_genomes.nal','curatedXylellaDatabase.nal',
@@ -80,10 +89,10 @@ parser.add_argument("-d", "--database", nargs="?", choices=['Plant_Bacteria_Fung
                                                             'bacterialGenome2024_01_24.fna.nal','emu','16S_ITS.nal','uniteMonica'],
                     default="",
                     help="database name; can be a fasta file or a subset of ncbi database; Default is Plant_Bacteria_Funghi")
-parser.add_argument("-dbe", "--database_external", nargs="?")
-parser.add_argument("-tmp", "--temp", nargs="?", default="/tmp/")
+parser.add_argument("-dbe", "--database_external", nargs="?", default="")
+parser.add_argument("-tmp", "--temp", nargs="?", default='/mnt/dataQNAP/tmp/')
 parser.add_argument("--folder_fastq", help='folder where fastq file are located', required=True,
-                    default="/data/sharedata/")#, widget='DirChooser')
+                    default="/mnt/data3ZEUSPV/SequenceData/")#, widget='DirChooser')
 parser.add_argument("-e", "--email", nargs="?", default="", help="email for blast search", required=True)
 parser.add_argument("-s", "--search", nargs="?", default="", help="ncbi search to retrieve GIs")
 parser.add_argument("-sp", "--species", nargs="?", default="", help="PUBMLST species to use")
@@ -95,10 +104,10 @@ parser.add_argument("-mr", "--min_reads", type = float, default="100", help="min
 parser.add_argument("-int", "--interval", default="100-20000", help="minimum and max read length"
                                                                             " to use in the correction step; default [100-20000]")
 parser.add_argument("-su", "--subset", default="0", type = int, help="number of reads to use for each barcode [0]")
-parser.add_argument("-mrc", "--num_reads_cor", type=int, default="0",
+parser.add_argument("-mrc", "--num_reads_cor", type=int, default="15",
                     help="minimum number of reads to use in overlapping for reads correction [0]. 0 = no filtering")
-
 parser.add_argument("-a", "--assemble", action='store_true', help="assembled-reads", default=False)
+parser.add_argument("-sl", "--slurm", action='store_true', help="activate slurm grid", default=False)
 parser.add_argument("-ua", "--use_assembled", action='store_true', help="use assembled reads for "
                                                                         "discovery", default=False)
 parser.add_argument("-dh", "--database_history", action='store_true', help="", default=False)
@@ -111,43 +120,97 @@ parser.add_argument("-u_e3", "--update_ete", action='store_true', help="update d
 parser.add_argument("-v",'--verbose', help='be verbose', dest='verbose', action='store_true', default=False)
 parser.add_argument("-cu", "--cleanup", action='store_true', help="clean up verbose previous run",
                     default=False)
+parser.add_argument("-slt", "--slurm_threads", nargs="?", type = int, default="0", help="number of threads for slurm")
 
 
-#args = parser.parse_args()
-    #return args
-def parse_blast(input):
-    bitscore_current = 0
-    name, db, query = input
-    dict_fasta = {}
-    record = SeqIO.read(query, "fasta")
-    dict_fasta[record.id] = record
-    with open(name) as f:
-        for line in f:
-            qseqid, sseqid, bitscore, sscinames, pident, evalue, staxids, qlen, sstart, send  = line.rstrip().split("\t")
-            if float(bitscore) >=  bitscore_current:
-                bitscore_current = float(bitscore)
-                if "|" in sseqid:
-                    gi = sseqid.split("|")[1]
-                sseqid = gi
-                blastdb_cmd = "blastdbcmd -db " + db + " -entry " + sseqid
-                print(blastdb_cmd)
-                blastdbcmd = sb.Popen(blastdb_cmd, shell=True, stderr=sb.PIPE, stdout=sb.PIPE)
-                out, err = blastdbcmd.communicate()
-                fasta = out.decode("utf-8").split("\n")
-                idf = fasta[0].split(" ")[0].replace(">", "")
-                id = staxids + "_" + idf
-                del fasta[0]
-                record = SeqRecord(Seq("".join(fasta)), id=id)
-                if int(sstart) > int(send):
-                    recordrc = record.seq.reverse_complement()
-                    record_new = SeqRecord(recordrc, id=id)
-                else:
-                    record_new = record
-                dict_fasta[record_new.id] = record_new
-    with open(name + "seq.aln.fasta", "w") as fh:
-        SeqIO.write(dict_fasta.values(), fh, 'fasta')
-    return (dict_fasta)
+def parse_blast(name):
+        species = ""
+        unambiguous = True
+        with open(name) as f:
+            for line in f:
+                qseqid, sseqid, bitscore, sscinames, pident, evalue, staxids, qlen = line.rstrip().split("\t")
+                if staxids != "0" and not ";" in staxids:
+                    if species == "" and unambiguous:
+                        try:
+                            lineage = ncbi.get_lineage(staxids)
+                            species = [staxids, bitscore, qseqid, pident, qseqid, sseqid, lineage]
+                            staxidsC, bitscoreC, qseqidC, pidentC, qseqidC, sseqidC, lineageC = species
+                        except:
+                            print("TAXID " + str(staxids) + " NOT FOUND")
+                    else:
+                        if unambiguous and bitscoreC < bitscore:
+                            try:
+                                lineage = ncbi.get_lineage(staxids)
+                                species = [staxids, bitscore, bitscore, pident, qseqid, sseqid, lineage]
+                                staxidsC, bitscoreC, qseqidC, pidentC, qseqidC, sseqidC, lineageC = species
+                            except:
+                                print("TAXID " + str(staxids) + " NOT FOUND")
 
+                        elif unambiguous and bitscoreC == bitscore and staxidsC != staxids and len(lineage) > 1:
+                            if unambiguous and pidentC < pident:
+                                try:
+                                    lineage = ncbi.get_lineage(staxids)
+                                    species = [staxids, bitscore, bitscore, pident, qseqid, sseqid, lineage]
+                                    staxidsC, bitscoreC, qseqidC, pidentC, qseqidC, sseqidC, lineageC = species
+                                except:
+                                    print("TAXID " + str(staxids) + " NOT FOUND")
+                            else:
+                                lineage_old = "_".join(list(map(str, lineageC)))
+                                lineage_new = "_".join(list(map(str, lineage)))
+                                both_lineage = {lineage_old, lineage_new}
+                                common_taxid = common_start(*both_lineage)
+                                if "_" in common_taxid and len(common_taxid.split("_")) >= 2:
+                                    common_taxid_uniq = common_taxid.split("_")[-2]
+                                    species = [common_taxid_uniq, bitscore, bitscore, pident, qseqid, sseqid,
+                                               ncbi.get_lineage(common_taxid_uniq)]
+                                else:
+                                    species = []
+                                    continue
+                if staxids == "0" and sscinames == "N/A":
+                    if ":" in sseqid:
+                        staxids = sseqid.split(":")[0]
+                        if species == "" and unambiguous:
+                            try:
+                                lineage = ncbi.get_lineage(staxids)
+                                species = [staxids, bitscore, qseqid, pident, qseqid, sseqid, lineage]
+                                staxidsC, bitscoreC, qseqidC, pidentC, qseqidC, sseqidC, lineageC = species
+                            except:
+                                print("TAXID " + str(staxids) + " NOT FOUND")
+                                lineage = []
+                        else:
+                            if unambiguous and bitscoreC < bitscore:
+                                try:
+                                    lineage = ncbi.get_lineage(staxids)
+                                    species = [staxids, bitscore, qseqid, pident, qseqid, sseqid, lineage]
+                                    staxidsC, bitscoreC, qseqidC, pidentC, qseqidC, sseqidC, lineageC = species
+                                except:
+                                    print("TAXID " + str(staxids) + " NOT FOUND")
+                                    lineage = []
+                            elif unambiguous and bitscoreC == bitscore and staxidsC != staxids and len(lineage) > 1:
+                                if unambiguous and pidentC < pident:
+                                    try:
+                                        lineage = ncbi.get_lineage(staxids)
+                                        species = [staxids, bitscore, qseqid, pident, qseqid, sseqid, lineage]
+                                        staxidsC, bitscoreC, qseqidC, pidentC, qseqidC, sseqidC, lineageC = species
+                                    except:
+                                        print("TAXID " + str(staxids) + " NOT FOUND")
+                                        lineage = []
+                                else:
+                                    lineage_old = "_".join(list(map(str, lineageC)))
+                                    lineage_new = "_".join(list(map(str, lineage)))
+                                    both_lineage = {lineage_old, lineage_new}
+                                    common_taxid = common_start(*both_lineage)
+                                    if "_" in common_taxid and len(common_taxid.split("_")) >= 2:
+                                        common_taxid_uniq = common_taxid.split("_")[-2]
+                                        species = [common_taxid_uniq, bitscore, qseqid, pident, qseqid, sseqid, ncbi.get_lineage(common_taxid_uniq)]
+                                    else:
+                                        species = []
+                                        continue
+
+
+        if not verbose:
+            os.remove(name)
+        return (species)
 
 def get_desired_ranks(taxid, desired_ranks):
     value_taxid, score = taxid
@@ -178,9 +241,9 @@ def best_align_match(samfile, iteration):
         samDict = {}
         count = 0
         filtered = samfile + ".reduced.paf"
-        with gzip.open(samfile, "r") as sam, open(filtered, "w") as reduced:
+        with open(samfile, "r") as sam, open(filtered, "w") as reduced:
             for line in sam:
-                line = line.decode()
+                #line = line.decode()
                 paf = line.split("\t")
                 if paf[0] in samDict:
                     if count < iteration:
@@ -208,9 +271,9 @@ def consensus_seq(file, fastq, set_count):
     record_dict = SeqIO.to_dict(SeqIO.parse(fastq.name, "fasta"))
     samDict = {}
     count = 0
-    with gzip.open(file, "r") as sam:
+    with open(file, "r") as sam:
         for line in sam:
-            line = line.decode()
+            #line = line.decode()
             paf = line.split("\t")
             if paf[0] in samDict:
                 if count < set_count:
@@ -286,20 +349,180 @@ def convert_color(test):
         complete_colors.append([name_sp ,tuple(number_rgb)])
     return(complete_colors)
 
+def blast_slurm(elms):
+    
+    query, db, out, verbose, cleanup, jobs_id = elms
+    if verbose:
+        slurm = Slurm(
+            ntasks=1,
+            cpus_per_task=1,
+            export=f'BLASTDB=/mnt/dataQNAP/blastdb/',
+        )
+    else:
+        slurm = Slurm(
+            ntasks=1,
+            cpus_per_task=1,
+            output=f'/dev/null',
+            error=f'/dev/null',
+            export=f'BLASTDB=/mnt/dataQNAP/blastdb/',
+    )
+
+    blastn_cline = BLASTN % (db, query, out)
+    #print(blastn_cline)
+    slurm.add_arguments(job_name=jobs_id)
+    try:
+        slurm.sbatch(blastn_cline)
+    except:
+        print("BLASTN failed " + blastn_cline)
+    if verbose:
+        print(slurm)
+
+def wait_for_file_to_stabilize(filepath):
+
+    check_interval = 2
+    wait_time = 10
+    previous_size = -1
+    stable_time = 0
+
+    while True:
+        # Get the current file size
+        current_size = os.path.getsize(filepath)
+
+        # If file size hasn't changed, increment the stable time
+        if current_size == previous_size:
+            stable_time += check_interval
+        else:
+            stable_time = 0  # Reset if size changes
+
+        # If the file size is stable for the desired wait time, exit the loop
+        if stable_time >= wait_time:
+            #print(f"File has stabilized after {stable_time} seconds.")
+            break
+
+        # Update the previous size and wait before checking again
+        previous_size = current_size
+        #print(f"File size: {current_size} bytes, waiting for {check_interval} seconds...")
+        time.sleep(check_interval)
+
+def extract_aligned_reads(paf_file, fasta_file, num_reads_cor):
+    aligned_read_ids = {}
+
+    # Read the PAF file and extract the read IDs of aligned reads
+    with open(paf_file, 'r') as paf:
+        for line in paf:
+            fields = line.split('\t')
+            if fields[0] in aligned_read_ids:
+                if len(aligned_read_ids[fields[0]]) < int(num_reads_cor):
+                    aligned_read_ids[fields[0]].append(fields[5])
+            else:
+                aligned_read_ids[fields[0]] = [fields[5]]
+
+    record_dict = SeqIO.to_dict(SeqIO.parse(fasta_file, "fastq"))
+
+    file_names_list = []
+    for sequence in aligned_read_ids:
+        collection_sequence = []
+        for sequence_id in aligned_read_ids[sequence]:
+            collection_sequence.append(record_dict[sequence_id])
+        file_name = os.path.join(dirpathTEMP, sequence + "out_seq")
+        file_names_list.append(file_name)
+        with open(file_name, "w") as output_handle:
+            SeqIO.write(collection_sequence, output_handle, "fasta")
+
+    return (file_names_list)
+
+def run_cap3(fasta_file):
+    keep_fasta = []
+    # for fasta in fasta_file:
+    cap3 = sb.Popen(['/home/lfaino/Downloads/CAP3/cap3', fasta_file], stdout=sb.PIPE, stderr=sb.PIPE, cwd = dirpathTEMP)
+    out, err = cap3.communicate()
+    file_contig = fasta_file +".cap.contigs"
+    if os.path.exists(file_contig) and os.path.getsize(file_contig) > 10:
+        for record in SeqIO.parse(file_contig, 'fasta'):
+            fasta = fasta_file.split("/")[-1].split(".")[0].replace("out_seq", "")
+            record.id = fasta
+            keep_fasta.append(record)
+
+    if len(keep_fasta) == 1:
+        return keep_fasta[0]
+
+def slurm_others(command, slurm_threads,verbose,tmp_slurm, email):
+    job_id = ''.join(random.choices('0123456789abcdef', k=8))
+    software = command.split(" ")[0]
+    while True:
+        job_master_error = tmp_slurm + f'/{job_id}_{software}.err'
+        job_master_out = tmp_slurm + f'/{job_id}_{software}.out'
+        slurm = Slurm(
+            cpus_per_task=slurm_threads,
+            quiet = True
+        )
+        slurm.add_arguments(job_name=job_id)
+        slurm.add_arguments(mail_user=email)
+        slurm.add_arguments(output=job_master_out)
+        slurm.add_arguments(error=job_master_error)
+
+
+        slurm.sbatch(command)
+        if verbose:
+            print(slurm)
+        print_out = True
+        while True:
+            result = sb.run(['squeue'], stdout=sb.PIPE, stderr=sb.PIPE, text=True)
+            if print_out:
+                print("WAITING FOR SLURM TO FINISH " + software)
+                print_out = False
+            if not job_id in result.stdout:
+                break
+            time.sleep(60)
+        if "racon" in command:
+            output_file = command.split(" ")[-1]
+            wait_for_file_to_stabilize(output_file)
+        elif "minimap2" in command:
+            output_file = command.split(" ")[-1]
+            wait_for_file_to_stabilize(output_file)
+        else:
+            print("DONE" + command)
+        if os.path.exists(job_master_error):
+            with open(job_master_error, "r") as f:
+                lines = f.readlines()
+                if lines:
+                    last_line = lines[-1].strip()
+                    if "Killed" in last_line:
+                        slurm_threads -= 10
+                        if "racon" in command:
+                            command_list = command.split(" ")
+                            command_list[2] = str(slurm_threads)
+                            command = " ".join(command_list)
+                            os.remove(job_master_out)
+                            os.remove(job_master_error)
+                        elif "minimap2" in command:
+                            command_list = command.split(" ")
+                            command_list[4] = str(slurm_threads)
+                            command = " ".join(command_list)
+                            os.remove(job_master_out)
+                            os.remove(job_master_error)
+                        else:
+                            print("I CAN NOT SET NEW THREADS NUMBER")
+                    else:
+                        break
+
 def blast(elm):
 
-    query, db, out, verbose, cleanup = elm
+    query, db, out, verbose, cleanup, slurm = elm
+    open(out, 'a').close()
     if os.path.isfile(out) and os.path.getsize(out) > 0 and verbose and not cleanup:
         return out
     else:
-        blastn_cline = Bio.Blast.Applications.NcbiblastnCommandline(db=db, query=query, max_target_seqs=10 ,evalue=0.001, out=out,
-                                                                outfmt = "6 qseqid sseqid bitscore sscinames pident evalue staxids qlen sstart send")
-
+        #BLASTN = "blastn -db %s query %s -max_target_seqs 10 -evalue 0.001 -out %s -outfmt \"6 qseqid sseqid bitscore sscinames pident evalue staxids qlen\""
+        blastn_cline = BLASTN % (db, query, out)
         try:
-            blastn_cline()
+            blastn = sb.Popen(blastn_cline, shell=True, stderr=sb.PIPE)
+            blastn.communicate()
+            if not verbose:
+                os.remove(query)
         except ValueError:
             print(blastn_cline)
-        return([out, db, query])
+        return(out)
 
 def download_fasta(elm):
     search, retmax, retstart, email = elm
@@ -309,34 +532,102 @@ def download_fasta(elm):
     records = str("\n".join(record["IdList"]))
     return (records)
 
+def cap3(fastq, threads, cwd, num_reads_cor, mafft, verbose, slurm, slurm_threads, tmp_slurm, email):
 
-def download_fasta_refine(species_name, output_file):
-        # Step 1: Search for the species in NCBI Nucleotide database
-        search_handle = Entrez.esearch(db="nucleotide", term=species_name, retmax=10000)
-        search_results = Entrez.read(search_handle)
-        search_handle.close()
+    paf = tempfile.NamedTemporaryFile(dir=dirpathTEMP,suffix=".paf", delete=False)
+    reads_out = tempfile.NamedTemporaryFile(dir=dirpathTEMP,suffix=".fasta", delete=False)
+    print("RUNNING MINIMAP")
 
-        # Step 2: Get the list of sequence IDs
-        sequence_ids = search_results['IdList']
+    if slurm:
+        m = MINIMAP % (slurm_threads, num_reads_cor, fastq, fastq, paf.name)
+        if num_reads_cor == 0:
+            m = m.replace("-N 0", " ")
+        slurm_others(m, slurm_threads, verbose, tmp_slurm,email)
+    else:
+        m = MINIMAP % (threads, num_reads_cor, fastq, fastq, paf.name)
+        if num_reads_cor == 0:
+            m = m.replace("-N 0", " ")
+        minimap = sb.Popen(m, shell=True, cwd=cwd, stderr=sb.PIPE)
+        minimap.communicate()
+    if verbose:
+        print(m)
+    fasta_file = extract_aligned_reads(paf.name, fastq, num_reads_cor)
+    result_cap3 = []
+    print("RUNNING CAP3")
+    with Pool(processes=threads) as pool:
+        for result in tqdm(pool.imap(func=run_cap3, iterable=fasta_file), total=len(fasta_file)):
+            result_cap3.append(result)
+    print(reads_out.name)
+    cleaned_arr = list(filter(None, result_cap3))
+    with open(reads_out.name, 'w') as out_fasta:
+        for record in cleaned_arr:
+            SeqIO.write(record, out_fasta, 'fasta')
+    return (reads_out.name)
 
-        # Step 3: Fetch the sequences in batches
-        batch_size = 500
-        sequences = []
-        for start in range(0, len(sequence_ids), batch_size):
-            end = min(len(sequence_ids), start + batch_size)
-            fetch_handle = Entrez.efetch(db="nucleotide", id=sequence_ids[start:end], rettype="gb", retmode="text")
-            sequences += list(SeqIO.parse(fetch_handle, "gb"))
-            fetch_handle.close()
-
-        # Step 4: Write sequences to an output file in FASTA format
-        with open(output_file, "w") as output_handle:
-            SeqIO.write(sequences, output_handle, "fasta")
-
-
-
+def racon_assembly(fastq, threads, cwd, num_reads_cor, verbose):
+    sam = tempfile.NamedTemporaryFile(dir=dirpathTEMP,suffix=".paf.gz", delete=False)
+    reads = tempfile.NamedTemporaryFile(dir=dirpathTEMP,suffix=".fasta", delete=False)
+    print("RUNNING MINIMAP")
+    m = MINIMAP % (threads, num_reads_cor, fastq, fastq, sam.name)
+    print(m)
+    minimap = sb.Popen(m, shell=True, cwd=cwd, stderr=sb.PIPE)
+    minimap.communicate()
+    filtered = best_align_match(sam.name, num_reads_cor)
+    print("RUNNING RACON")
+    r = RACON % (threads, fastq, filtered , fastq)
+    if verbose:
+        print(r)
+    racon_cmd = sb.Popen(r, shell=True, cwd=cwd, stdout=reads, stderr=sb.PIPE)
+    racon_cmd.communicate()
+    if not verbose:
+        os.remove(sam.name)
+    if os.path.exists(filtered):
+        if not verbose:
+            os.remove(filtered)
+    sam = tempfile.NamedTemporaryFile(dir=dirpathTEMP,suffix=".paf.gz",delete=False)
+    print("RUNNING MINIMAP")
+    m = MINIMAP % (threads, num_reads_cor, reads.name, fastq, sam.name)
+    if verbose:
+        print(m)
+    minimap = sb.Popen(m, shell=True, cwd=cwd, stderr=sb.PIPE)
+    minimap.communicate()
+    filtered = best_align_match(sam.name, num_reads_cor)
+    print("RUNNING RACON")
+    r = RACON % (threads, fastq, filtered, reads.name)
+    if verbose:
+        print(r)
+    output = tempfile.NamedTemporaryFile(dir=dirpathTEMP,suffix=".fasta", delete=False)
+    racon_cmd = sb.Popen(r, shell=True, cwd=cwd, stdout=output, stderr=sb.PIPE)
+    racon_cmd.communicate()
+    if mafft:
+        print("RUNNING MAFFT FOR READ CORRECTION AND ASSEMBLY")
+        sam = tempfile.NamedTemporaryFile(dir=dirpathTEMP,suffix=".paf.gz", delete=False)
+        print("RUNNING MINIMAP")
+        m = MINIMAP % (threads, num_reads_cor, output.name, output.name, sam.name)
+        if verbose:
+            print(m)
+        minimap = sb.Popen(m, shell=True, cwd=cwd, stderr=sb.PIPE)
+        minimap.communicate()
+        if num_reads_cor == 0:
+            num_reads_cor = 100
+        outputCons = consensus_seq(sam.name, output, num_reads_cor)
+        if not verbose:
+            os.remove(sam.name)
+        if os.path.exists(filtered):
+            if not verbose:
+                os.remove(filtered)
+        if not verbose:
+            os.remove(reads.name)
+        if verbose:
+            print("Racon output is:" + outputCons)
+        return(outputCons)
+    else:
+        return (output.name)
 
 def assembly(output, cwd, threads, read_mapping, od, fastq, fast5, verbose):
-    jfc_out = tempfile.NamedTemporaryFile(dir=dirpathTEMP,suffix=".fasta", delete=False)
+
+    print("STARTED TO RUN ASSEMBLY")
+    jfc_out = tempfile.NamedTemporaryFile(dir=dirpathTEMP,suffix=".jfc.fasta", delete=False)
     print("RUNNING JELLYFISH")
     jfc = JELLYFISH_COUNT % output
     jfd = JELLYFISH_DUMP % jfc_out.name
@@ -405,7 +696,6 @@ def assembly(output, cwd, threads, read_mapping, od, fastq, fast5, verbose):
         nanopolish_vcf.communicate()
         bam = tempfile.NamedTemporaryFile(dir=dirpathTEMP,suffix=".bam", delete=False)
         bi = BWAI % mlst
-
         bwa_index = sb.Popen(bi, shell=True, cwd=dirpathTEMP)
         bwa_index.communicate()
         bm = BWA % (threads, mlst, output)
@@ -452,10 +742,13 @@ def assembly(output, cwd, threads, read_mapping, od, fastq, fast5, verbose):
         #print(mlst_done)
         bcftools_call = sb.Popen(bcfco, shell=True, cwd=cwd, stdout=sb.PIPE, stderr=sb.PIPE)
         bcftools_call.communicate()
+        print("FINISHED TO RUN ASSEMBLY")
+
         return(mlst_done)
 
     except:
         mlst_done = ""
+        print("FINISHED TO RUN ASSEMBLY")
         return (mlst_done)
 
 def mlstget(species):
@@ -535,33 +828,67 @@ def histograplot(dict_species_all, figure_file):
     plt.savefig(figure_file)
     return()
 
+def heatmap_clustering(dict_species_all, figure_file):
+
+
+    df = pd.DataFrame.from_dict(dict_species_all)
+    # df1 = df.transpose()
+    df.fillna(0, inplace=True)
+    df_percentage = df.div(df.sum(axis=0), axis=1) * 100
+    df_filtered = df_percentage[(df_percentage <= 1).any(axis=1)]
+
+    plt.figure(figsize=(10, 8))
+    sns.heatmap(df_filtered, cmap='viridis', annot=True, fmt=".1f")
+
+    plt.title('Heatmap delle prime 30 specie più abbondanti nei campioni')
+    plt.xlabel('Campioni')
+    plt.ylabel('Microorganismi')
+
+    cluster_map = sns.clustermap(df_filtered, cmap='viridis', annot=True, fmt=".1f", metric="euclidean", method="average",
+                                 figsize=(12, 10))
+    plt.title('Clustermap delle prime 30 specie più abbondanti nei campioni')
+    plt.savefig(figure_file)
+
 def main():
     print("PROGRAM STARTED")
     # args = setting()
     args = parser.parse_args()
+    job_id = ''.join(random.choices('0123456789abcdef', k=8))
     global dirpathTEMP
     dirpathTEMP = tempfile.mkdtemp(dir=args.temp)
+    global temp
     temp = args.temp
+    if args.slurm:
+        temp = "/mnt/dataQNAP/tmp"
     global verbose
     verbose = args.verbose
     if args.update_ete:
         ncbi.update_taxonomy_database()
     if args.species != "":
         fastamlst = mlstget(args.species)
+
+    global cwd
     cwd = args.folder_fastq
+    global od
     od = os.getcwd()
-    #number = int(args.output)
 
     Bio.Entrez.email = args.email
     new_string = re.sub("[^0-9a-zA-Z]+", "_", args.search)
-    name_plot = args.output + ".pdf"
+    name_plot_hist = args.output + ".histogram.pdf"
+    name_plot_heat= args.output + ".heatmap.pdf"
     name_table = args.output + ".xlsx"
-    figure_file = os.path.join(od, name_plot)
+    figure_file_hist = os.path.join(od, name_plot_hist)
+    figure_file_heat = os.path.join(od, name_plot_heat)
     name_table = os.path.join(od, name_table)
-    os.environ["BLASTDB"] = "/data2/blastdb"
+    os.environ["BLASTDB"] = "/mnt/dataQNAP/blastdb/"
     blastdb = os.environ['BLASTDB']
     outputRacon = ""
-    if args.search != "":
+    blastdbcmd_cmd = "blastdbcmd -db " + args.database_external + " -info"
+    blastdbcmd = sb.Popen(blastdbcmd_cmd, shell=True, stderr=sb.PIPE, stdout=sb.PIPE)
+    out, err = blastdbcmd.communicate()
+    if err.decode() == "":
+        database_name = args.database_external
+    elif args.search != "":
         database_name = os.path.join(blastdb, new_string)
         print("USING DATABASE NAME %s" % database_name)
         database_name_check = os.path.join(blastdb, new_string + ".nal")
@@ -580,13 +907,14 @@ def main():
                 id_download.append([args.search,retmax, retstart, args.email])
                 retstart = count * retmax
             result_list_tqdm = []
-            if repeat > 10:
-                threads = 10
-            else:
-                threads = repeat
-            with Pool(processes=threads) as pool:
-                for result in tqdm(pool.imap(func=download_fasta, iterable=id_download), total=len(id_download)):
-                    result_list_tqdm.append(result)
+            #if repeat > 10:
+            #    threads = 10
+            #else:
+            #    threads = repeat
+            for subset in tqdm(id_download):
+                result = download_fasta(subset)
+                result_list_tqdm.append(result)
+                time.sleep(10)
             records = "\n".join(result_list_tqdm)
             fp = tempfile.NamedTemporaryFile(dir=dirpathTEMP, delete= False)
             fp.write(records.encode())
@@ -669,6 +997,7 @@ def main():
     mlstCount = {}
     min, max = args.interval.split("-")
     for barcode in list_barcode:
+        fastx_all = []
         list_species_verbose = []
         rank_path = os.path.join(od, barcode + "_rank.txt")
         count = 0
@@ -735,8 +1064,6 @@ def main():
                 read_mapping = reads_fastq_select.name
             else:
                 print("UNKNOWN BARCODE TYPE. ACCEPTED FILES OR FOLDERS")
-            reads_porechop = tempfile.NamedTemporaryFile(dir=dirpathTEMP, suffix=".fastq", delete=False)
-
             count = 0
             print("RUNNING PORECHOP")
             reads_porechop_1 = tempfile.NamedTemporaryFile(dir=dirpathTEMP, suffix=".fastq", delete=False)
@@ -751,45 +1078,33 @@ def main():
                     sys.exit("FAST5 NOT PASSED WHILE ASKED FOR ASSEMBLED READS FOR ALIGNEMENT")
                 else:
                     if args.correct:
-                        fastx_all = []
-                        barcode_corr = racon(reads_porechop_1.name, args.threads, cwd, args.num_reads_cor, args.mafft, args.verbose)
+                        barcode_corr = cap3(reads_porechop_1.name, args.threads, cwd, args.num_reads_cor, args.mafft, args.verbose,
+                                             args.slurm, args.slurm_threads, temp, args.email)
                         if verbose:
                             print("USING " + barcode_corr + " FOR BLAST")
-                        for record in SeqIO.parse(barcode_corr, "fasta"):
+                        fasta_uncorrect = SeqIO.to_dict(SeqIO.parse(reads_porechop_1.name, "fastq"))
+                        fasta_correct = SeqIO.to_dict(SeqIO.parse(barcode_corr, "fasta"))
+                        print("WE CORRECTED " + str(len(fasta_correct)) + " OUT OF " + str(len(fasta_uncorrect)))
+                        uncorrected_records = [key for key in fasta_uncorrect if not key in fasta_correct]
+                        for id in uncorrected_records:
+                            fasta_correct[id] = fasta_uncorrect[id]
+                        for key in fasta_correct:
+                            record = fasta_correct[key]
                             if record.seq != "":
                                 fp = os.path.join(dirpathTEMP,
                                                   record.id + ".fasta")  # tempfile.NamedTemporaryFile(dir=dirpathTEMP, suffix=".fasta", mode="w", delete=False)
-                                fo = os.path.join(temp,
+                                fo = os.path.join(dirpathTEMP,
                                                   record.id + ".blastn")
                                 SeqIO.write(record, fp, "fasta")
-                                fastx_all.append([fp, database_name, fo, args.verbose, args.cleanup])
-                    else:
-                        fastx_all = []
-                        if verbose:
-                            print("USING " + reads_porechop_1.name + " FOR BLAST")
-                        for record in SeqIO.parse(reads_porechop_1.name, "fastq"):
-                            if record.seq != "":
-                                fp = os.path.join(dirpathTEMP,
-                                                  record.id + ".fasta")  # tempfile.NamedTemporaryFile(dir=dirpathTEMP, suffix=".fasta", mode="w", delete=False)
-                                fo = os.path.join(temp,
-                                                  record.id + ".blastn")  # tempfile.NamedTemporaryFile(dir=dirpathTEMP, mode="w", prefix=barcode, suffix=".blastn",
-
-                                SeqIO.write(record, fp, "fasta")
-                                fastx_all.append([fp, database_name, fo, args.verbose, args.cleanup])
-                                if not barcode.endswith("raw"):
-                                    if barcode.endswith("/"):
-                                        barcode = barcode.split("/")[-2] + "raw"
-                                    else:
-                                        barcode = barcode.split("/")[-1] + "raw"
+                                fastx_all.append([fp, database_name, fo, args.verbose, args.cleanup,job_id])
                     if args.use_assembled or args.assemble:
-                        if not args.correct:
-                            barcode_corr = racon(reads_porechop_1.name, args.threads, cwd, args.num_reads_cor, args.mafft, args.verbose)
-                        assembled = assembly(barcode_corr, cwd, args.threads, read_mapping, od, barcode,
+                        # barcode_corr_ass = racon_assembly(reads_porechop_1.name, args.threads, cwd, args.num_reads_cor, verbose)
+                        assembled = assembly(reads_porechop_1.name, cwd, args.threads, read_mapping, od, barcode,
                                                  args.folder_fast5, args.verbose )
-                        if verbose:
-                            print("USING " + assembled + " FOR BLAST")
+
                         if args.use_assembled:
-                            fastx_all = []
+                            if verbose:
+                                print("USING " + assembled + " FOR BLAST")
                             if args.verbose:
                                 print(assembled)
                             if assembled != "":
@@ -797,30 +1112,44 @@ def main():
                                     if record.seq != "":
                                         fp = os.path.join(dirpathTEMP,
                                                           record.id + ".fasta")  # tempfile.NamedTemporaryFile(dir=dirpathTEMP, suffix=".fasta", mode="w", delete=False)
-                                        fo = os.path.join(temp,
+                                        fo = os.path.join(dirpathTEMP,
                                                           record.id + ".blastn")  # tempfile.NamedTemporaryFile(dir=dirpathTEMP, mode="w", prefix=barcode, suffix=".blastn",
                                         SeqIO.write(record, fp, "fasta")
-                                        fastx_all.append([fp, database_name, fo, args.verbose, args.cleanup])
+                                        fastx_all.append([fp, database_name, fo, args.verbose, args.cleanup,job_id])
                             else:
                                 continue
+                    if len(fastx_all) == 0:
+                        if verbose:
+                            print("USING UNCORRECTED READS FOR BLAST")
+                        for record in SeqIO.parse(reads_porechop_1.name, "fastq"):
+                            if record.seq != "":
+                                fp = os.path.join(dirpathTEMP,
+                                                  record.id + ".fasta")  # tempfile.NamedTemporaryFile(dir=dirpathTEMP, suffix=".fasta", mode="w", delete=False)
+                                fo = os.path.join(dirpathTEMP,
+                                                  record.id + ".blastn")  # tempfile.NamedTemporaryFile(dir=dirpathTEMP, mode="w", prefix=barcode, suffix=".blastn",
+                                SeqIO.write(record, fp, "fasta")
+                                fastx_all.append([fp, database_name, fo, args.verbose, args.cleanup, job_id])
+                                if not barcode.endswith("raw"):
+                                    if barcode.endswith("/"):
+                                        barcode = barcode.split("/")[-2] + "raw"
+                                    else:
+                                        barcode = barcode.split("/")[-1] + "raw"
             else:
                 if verbose:
                     print("USING " + reads_porechop_1.name + " FOR BLAST")
-                fastx_all = []
-                for record in SeqIO.parse(reads_porechop_1.name, "fastq"):
-                    if record.seq != "":
-                        fp = os.path.join(dirpathTEMP, record.id + ".fasta")# tempfile.NamedTemporaryFile(dir=dirpathTEMP, suffix=".fasta", mode="w", delete=False)
-                        fo = os.path.join(temp, record.id + ".blastn") #tempfile.NamedTemporaryFile(dir=dirpathTEMP, mode="w", prefix=barcode, suffix=".blastn",
-                        # fp = tempfile.NamedTemporaryFile(dir=dirpathTEMP, suffix=".fasta", mode="w", delete=False)
-                        # fo = tempfile.NamedTemporaryFile(dir=dirpathTEMP, mode="w", prefix=barcode, suffix=".blastn", delete=False)
-                        SeqIO.write(record, fp, "fasta")
-                        fastx_all.append([fp, database_name,fo, args.verbose, args.cleanup])
-                        if not barcode.endswith("raw"):
-                            if barcode.endswith("/"):
-                                barcode = barcode.split("/")[-2]+ "raw"
-                            else:
-                                barcode = barcode.split("/")[-1]+ "raw"
-            # if arg
+                if 'fastx_all' in locals():
+                    for record in SeqIO.parse(reads_porechop_1.name, "fastq"):
+                        if record.seq != "":
+                            fp = os.path.join(dirpathTEMP, record.id + ".fasta")# tempfile.NamedTemporaryFile(dir=dirpathTEMP, suffix=".fasta", mode="w", delete=False)
+                            fo = os.path.join(dirpathTEMP, record.id + ".blastn") #tempfile.NamedTemporaryFile(dir=dirpathTEMP, mode="w", prefix=barcode, suffix=".blastn",
+                            SeqIO.write(record, fp, "fasta")
+                            fastx_all.append([fp, database_name,fo, args.verbose, args.cleanup, job_id])
+                            if not barcode.endswith("raw"):
+                                if barcode.endswith("/"):
+                                    barcode = barcode.split("/")[-2]+ "raw"
+                                else:
+                                    barcode = barcode.split("/")[-1]+ "raw"
+
             if len(fastx_all) < int(args.min_reads) and not args.use_assembled:
                 print("Not analysing barcode " + barcode +". Less than " + str(args.min_reads) + " reads")
                 continue
@@ -832,10 +1161,10 @@ def main():
                 for record in SeqIO.parse(outputRacon, "fasta"):
                     if record.seq != "":
                         fp = os.path.join(dirpathTEMP, record.id + ".fasta")# tempfile.NamedTemporaryFile(dir=dirpathTEMP, suffix=".fasta", mode="w", delete=False)
-                        fo = os.path.join(temp, record.id + ".blastn") #tempfile.NamedTemporaryFile(dir=dirpathTEMP, mode="w", prefix=barcode, suffix=".blastn",
+                        fo = os.path.join(dirpathTEMP, record.id + ".blastn") #tempfile.NamedTemporaryFile(dir=dirpathTEMP, mode="w", prefix=barcode, suffix=".blastn",
                                                         # delete=False)
                         SeqIO.write(record, fp, "fasta")
-                        correct_racon_blast.append([fp, fastamlst,fo, args.verbose, args.cleanup])
+                        correct_racon_blast.append([fp, fastamlst,fo, args.verbose, args.cleanup, job_id])
 
                 with Pool(processes=args.threads) as pool:
                     for result in tqdm(pool.imap(func=blast, iterable=correct_racon_blast), total=len(correct_racon_blast)):
@@ -848,24 +1177,43 @@ def main():
                         hystogram.append(first_line.split("\t")[1])
                 a = dict(Counter(hystogram))
                 mlstCount[barcode] = a
-            print("RUNNING BLAST USING "  + str(args.threads) + " THREADS")
-            with Pool(processes=args.threads) as pool:
-                for result in tqdm(pool.imap(func=blast, iterable=fastx_all), total=len(fastx_all)):
-                    result_list.append(result)
+            if args.slurm:
+                result_list = []
+                for index, line in enumerate(fastx_all):
+                    blast_slurm(line)
+                    result_list.append(line[2])
+                    if args.slurm_threads > 0:
+                        if (index + 1) % args.slurm_threads == 0:
+                            time.sleep(90)  # Pause the loop for 5 seconds
+
+                while True:
+                    result = sb.run(['squeue'], stdout=sb.PIPE, stderr=sb.PIPE, text=True)
+                    print("WAITING FOR SLURM TO FINISH")
+                    if not job_id in result.stdout:
+                        break
+                    time.sleep(15)
+                # for p in Path(od).glob("slurm-*.out"):
+                #     p.unlink()
+            else:
+                cores = args.threads
+                print("RUNNING BLAST USING "  + str(cores) + " THREADS")
+                with Pool(processes=cores) as pool:
+                    for result in tqdm(pool.imap(func=blast, iterable=fastx_all), total=len(fastx_all)):
+                        result_list.append(result)
+            existing_files = [f for f in result_list if os.path.exists(f)]
             dict_species_new ={}
             barcode_all_excel =  os.path.join(od, barcode + "_blastn_results.txt")
-
-            file_blastn_results = []
-            for line in result_list:
-                file_blastn_results.append(line[0])
             with open(barcode_all_excel, 'w') as file:
-                input_lines = fileinput.input(file_blastn_results)
+                input_lines = fileinput.input(existing_files)
                 file.writelines(input_lines)
+
 
             blastn_results = []
             with Pool(processes=args.threads) as pool:
-                for result in tqdm(pool.imap(func=parse_blast, iterable=result_list), total=len(result_list)):
+                for result in tqdm(pool.imap(func=parse_blast, iterable=existing_files), total=len(result_list)):
                     blastn_results.append(result)
+            # for fasta_single in fastx_all:
+            #     os.remove(fasta_single[0])
 
             count_blast_hit = 0
             for species in blastn_results:
@@ -877,7 +1225,8 @@ def main():
                         dict_species_new[species[0]] = dict_species_new[species[0]] + 1
                     else:
                         dict_species_new[species[0]] = 1
-
+            if count_blast_hit == 0:
+                continue
             print("NUMBER OF READS CLASSIFIED " + str(count_blast_hit) + " RAPPRESENTING " + str((count_blast_hit/len(result_list)) *100) + " OF THE TOTAL NUMBER OF READS" )
 
             if args.verbose:
@@ -900,7 +1249,7 @@ def main():
                     speciesname = key
                 dict_name[speciesname] = dict_species_new[key]
             dict_table_all[barcode] = dict_name
-            kt_barcode = tempfile.NamedTemporaryFile(dir=dirpathTEMP,suffix=".txt", prefix=barcode, delete=False)
+            kt_barcode = tempfile.NamedTemporaryFile(dir=dirpathTEMP, suffix=".txt", prefix=barcode, delete=False)
             files_kt_list.append(kt_barcode.name)
             seq_count = 0
             total = 0
@@ -910,15 +1259,10 @@ def main():
             with open(kt_barcode.name, "w") as fh:
                 if args.verbose:
                     print(kt_barcode.name)
-                for key in dict_species_new:
-                    if min_value_to_use < dict_species_new[key]:
-                        count_rep = dict_species_new[key]
-                        seq_rep = 0
-                        while seq_rep < count_rep:
-                            seq_rep +=1
-                            match = "seq" + str(seq_count) + "\t" + str(key) + "\n"
-                            seq_count =+ 1
-                            fh.write(match)
+                for fastq_line in blastn_results:
+                    if len(fastq_line) > 3:
+                        output_kt = fastq_line[2] + "\t" + fastq_line[0] + "\n"
+                        fh.write(output_kt)
             taxid_list = [(key, dict_species_new[key]) for key in dict_species_new]
             taxid_dict_rank = desired_rank_file(taxid_list, desired_ranks)#, rank_path)
             taxid_pd_rank = pd.DataFrame.from_dict(taxid_dict_rank, orient='index')
@@ -935,29 +1279,22 @@ def main():
     species_abs.fillna(0)
     species_abs.transpose().to_excel(name_table)
     for key_barcode in dict_table_all:
-        print(key_barcode)
         dict_single_barcode = dict_table_all[key_barcode]
         total_sum = sum(dict_single_barcode.values())
         keys_to_remove = [key for key, value in dict_single_barcode.items() if value < (total_sum * (args.min/100))]
         for key in keys_to_remove:
             del dict_single_barcode[key]
-        # for key in dict_single_barcode:
-        #     taxid = ncbi.get_name_translator([str(key)])
-        #     for value in taxid.values():
-        #         output_file = "/tmp/" + str(value[0]) + ".fasta"
-        #         blastdb_cmd = "blastdbcmd -db nt -taxids " + str(value[0]) + " -out " + output_file
-        #         blastdbcmd = sb.Popen(blastdb_cmd, shell=True, stderr=sb.PIPE, stdout=sb.PIPE)
-        #         blastdbcmd.communicate()
-        #         if args.verbose:
-        #             print(value[0])
-        #             print(blastdb_cmd)
-
         dict_table_all[key_barcode] = dict_single_barcode
+
     if len(files_kt_list) > 0:
         plothystogramSpecies(files_kt_list,blastdb,args.output,od, args.verbose)
-        histograplot(dict_table_all, figure_file)
+        histograplot(dict_table_all, figure_file_hist)
+        heatmap_clustering(dict_table_all, figure_file_heat)
     else:
         print("NOTHING TO PLOT")
+
+    # if not args.verbose:
+    #     shutil.rmtree(dirpathTEMP)
 
 if __name__ == '__main__':
     main()
